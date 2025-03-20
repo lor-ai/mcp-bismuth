@@ -1,5 +1,5 @@
 # Titan Memory MCP Server
-
+## I'm aware its broken right now, I'll fix it! Ideally this just runs in yolo mode in cursor (or claude desktop) without human intervention and creates a "brain" available independent of LLM version.
 
 A neural memory system for LLMs that can learn and predict sequences while maintaining state through a memory vector. This MCP (Model Context Protocol) server provides tools for Claude 3.7 Sonnet and other LLMs to maintain memory state across interactions.
 
