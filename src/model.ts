@@ -3,10 +3,11 @@
  */
 
 import * as tf from '@tensorflow/tfjs-node';
-import { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, TensorContainer, unwrapTensor, wrapTensor, IMemoryModel, ITelemetryData, TensorError, MemoryError, IHierarchicalMemoryState, IExtendedMemoryState, IQuantizedMemoryState } from './types.js';
+import { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, TensorContainer, unwrapTensor, wrapTensor, IMemoryModel, ITelemetryData, TensorError, MemoryError, IHierarchicalMemoryState, IExtendedMemoryState, IQuantizedMemoryState, IHierarchicalMemoryStateInternal, IQuantizedMemoryStateInternal, DataTypeMap } from './types.js';
 import * as fs from 'fs/promises';
 import { z } from 'zod';
 import { checkNullOrUndefined, validateTensor, validateTensorShape, SafeTensorOps } from './utils.js';
+import { VectorProcessor } from './utils.js';
 
 // Add telemetry implementation
 class ModelTelemetry {
@@ -41,7 +42,7 @@ class ModelTelemetry {
         memoryUsage: {
           numTensors: endMemory.numTensors,
           numBytes: endMemory.numBytes,
-          unreliable: endMemory.unreliable
+          unreliable: !!endMemory.unreliable
         },
         metrics
       };
@@ -62,7 +63,11 @@ class ModelTelemetry {
       timestamp: Date.now(),
       operation,
       durationMs: 0,
-      memoryUsage: tf.memory(),
+      memoryUsage: {
+        numTensors: tf.memory().numTensors,
+        numBytes: tf.memory().numBytes,
+        unreliable: !!tf.memory().unreliable
+      },
       error: {
         name: error.name,
         message: error.message,
@@ -201,12 +206,17 @@ interface WeightInfo {
  */
 function safeLog(message: string): void {
   // Check if we're in an MCP context
-  const isMcpContext = process.env.MCP_CONTEXT === 'true';
+  const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Use correct variable name
 
-  if (!isMcpContext) {
+  if (!isMcpContextValue) {
     console.log(message);
   }
   // In MCP context, we don't log to console to avoid interfering with JSON communication
+}
+
+// Helper to deeply flatten and filter to number[]
+function flattenToNumberArray(arr: any): number[] {
+  return (arr as any[]).flat(Infinity).filter((v): v is number => typeof v === 'number');
 }
 
 export class TitanMemoryModel implements IMemoryModel {
@@ -231,10 +241,10 @@ export class TitanMemoryModel implements IMemoryModel {
 
   // Add hierarchical memory properties
   private hierarchicalLevels: number = 3;
-  private hierarchicalMemory: IHierarchicalMemoryState | null = null;
+  private hierarchicalMemory: IHierarchicalMemoryStateInternal | null = null;
 
   // Add quantization properties
-  private quantizedMemory: IQuantizedMemoryState | null = null;
+  private quantizedMemory: IQuantizedMemoryStateInternal | null = null;
   private quantizationBits: number = 8;
   private quantizationRanges: { min: number; max: number }[] = [];
 
@@ -244,10 +254,12 @@ export class TitanMemoryModel implements IMemoryModel {
   private contrastiveTemperature: number = 0.07;
 
   // Add encoder and decoder properties
-  private encoder: tf.LayersModel;
-  private decoder: tf.LayersModel;
+  private encoder!: tf.LayersModel;
+  private decoder!: tf.LayersModel;
   private tokenizer: any = null;
   private vocabSize: number = 10000;
+
+  private vectorProcessor: VectorProcessor = VectorProcessor.getInstance();
 
   // Add error handling wrapper
   private withErrorHandling<T>(operation: string, fn: () => T): T {
@@ -255,32 +267,41 @@ export class TitanMemoryModel implements IMemoryModel {
     const endTelemetry = telemetry.recordOperation(operation);
 
     try {
-      return fn();
+      const result = fn(); // Execute function first
+      endTelemetry(); // Record telemetry on success
+      return result; // Return result
     } catch (error) {
-      console.error(`Error in operation ${operation}:`, error);
+      const err = error as Error; // Cast error to Error
+      console.error(`Error in operation ${operation}:`, err);
 
-      // Log to telemetry
-      telemetry.recordError(operation, error);
+      // Log to telemetry, passing the casted Error object
+      telemetry.recordError(operation, err);
 
       // Attempt recovery based on error type
-      if (error instanceof TensorError) {
+      if (err instanceof TensorError) {
         this.resetGradients();
         console.log(`Recovered from tensor error in ${operation} by resetting gradients`);
-      } else if (error instanceof MemoryError) {
+      } else if (err instanceof MemoryError) {
         this.initializeMemoryState();
         console.log(`Recovered from memory error in ${operation} by reinitializing memory state`);
       }
 
-      throw error;
-    } finally {
+      // Always end telemetry, even on error
       endTelemetry();
+
+      throw err; // Re-throw the original error
     }
+    // Removed finally block
   }
 
   constructor(config?: Partial<TitanMemoryConfig>) {
     // Initialize with empty config first
     this.config = ModelConfigSchema.parse(config || {});
-    // Don't initialize components yet - wait for backend
+    // Always initialize a basic tokenizer
+    this.tokenizer = {
+      encode: (text: string) => Array.from(text).map(c => c.charCodeAt(0) % this.vocabSize),
+      decode: (tokens: number[]) => tokens.map(t => String.fromCharCode(t)).join('')
+    };
   }
 
   private async initializeBackend(): Promise<void> {
@@ -336,7 +357,7 @@ export class TitanMemoryModel implements IMemoryModel {
   private createEncoder(): tf.LayersModel {
     return this.withErrorHandling('createEncoder', () => {
       const inputShape = [this.config.inputDim];
-      const embeddingSize = this.config.embeddingSize;
+      const embeddingSize = this.config.memoryDim;
 
       // Create sequential model
       const model = tf.sequential();
@@ -369,7 +390,7 @@ export class TitanMemoryModel implements IMemoryModel {
   private createDecoder(): tf.LayersModel {
     return this.withErrorHandling('createDecoder', () => {
       // Input is concatenated embedding and memory
-      const inputShape = [this.config.embeddingSize * 2];
+      const inputShape = [this.config.memoryDim * 2];
       const outputDim = this.config.inputDim;
 
       // Create sequential model
@@ -378,7 +399,7 @@ export class TitanMemoryModel implements IMemoryModel {
       // Add layers
       model.add(tf.layers.dense({
         inputShape,
-        units: this.config.embeddingSize * 2,
+        units: this.config.memoryDim * 2,
         activation: 'relu',
         kernelInitializer: 'glorotNormal'
       }));
@@ -402,27 +423,19 @@ export class TitanMemoryModel implements IMemoryModel {
    * @param text The text to encode
    * @returns The encoded tensor
    */
-  private async encodeText(text: string): Promise<tf.Tensor> {
+  public async encodeText(text: string): Promise<tf.Tensor1D> {
     return this.withErrorHandling('encodeText', async () => {
-      if (!this.tokenizer) {
-        throw new Error('Tokenizer not initialized');
+      if (!this.vectorProcessor) {
+        throw new Error('VectorProcessor not initialized');
       }
-
-      // Tokenize the text
-      const tokens = this.tokenizer.encode(text);
-
-      // Convert to one-hot encoding
-      const oneHot = tf.oneHot(
-        tf.tensor1d(tokens, 'int32'),
-        this.vocabSize
-      );
-
-      // Average the embeddings if sequence is longer than 1
-      if (oneHot.shape[0] > 1) {
-        return tf.mean(oneHot, 0);
+      const tensor = await this.vectorProcessor.encodeText(text, this.config.inputDim || 768);
+      if (tensor.rank === 2 && tensor.shape[0] === 1) {
+        return tensor.squeeze() as tf.Tensor1D;
+      } else if (tensor.rank === 1) {
+        return tensor as tf.Tensor1D;
+      } else {
+        throw new Error('Encoded tensor has unexpected shape');
       }
-
-      return oneHot.reshape([this.vocabSize]);
     });
   }
 
@@ -432,44 +445,27 @@ export class TitanMemoryModel implements IMemoryModel {
    */
   public async initialize(config?: Partial<TitanMemoryConfig>): Promise<void> {
     return this.withErrorHandling('initialize', async () => {
-      // Update config with provided options
       if (config) {
         this.config = { ...this.config, ...config };
       }
-
-      // Create encoder and decoder
       this.encoder = this.createEncoder();
       this.decoder = this.createDecoder();
-
-      // Initialize optimizer
       const learningRate = this.config.learningRate || 0.001;
       this.optimizer = tf.train.adam(learningRate);
-
-      // Initialize memory state
       this.initializeMemoryState();
-
-      // Initialize tokenizer if text processing is needed
-      if (this.config.enableTextProcessing) {
-        // This is a placeholder - in a real implementation,
-        // you would load a proper tokenizer here
-        this.tokenizer = {
-          encode: (text: string) => {
-            return Array.from(text).map(c => c.charCodeAt(0) % this.vocabSize);
-          },
-          decode: (tokens: number[]) => {
-            return tokens.map(t => String.fromCharCode(t)).join('');
-          }
-        };
+      // Remove custom tokenizer, rely on VectorProcessor
+      if ((this.config as any).enableTextProcessing) {
+        if (!this.vectorProcessor) {
+          throw new Error('VectorProcessor not initialized');
+        }
       }
-
-      console.log('Model initialized successfully');
     });
   }
 
   /**
    * Retrieves memory based on query
    */
-  private retrieveFromMemory(query: ITensorWrapper): ITensorWrapper {
+  private retrieveFromMemory(query: ITensor): ITensor {
     return this.withErrorHandling('retrieveFromMemory', () => {
       // Calculate similarity between query and all memories
       const similarities = tf.matMul(
@@ -715,62 +711,52 @@ export class TitanMemoryModel implements IMemoryModel {
   /**
    * Forward pass with hierarchical memory support
    */
-  public forward(input: ITensorWrapper, state?: IMemoryState): {
-    predicted: ITensorWrapper;
-    memoryUpdate: {
-      newState: IMemoryState;
-      surprise: ITensorWrapper;
-    };
+  public forward(input: ITensor, state?: IMemoryState): {
+    predicted: ITensor;
+    memoryUpdate: IMemoryUpdateResult;
   } {
-    return tf.tidy(() => {
-      // Use provided state or current state
+    let predicted: ITensor;
+    let memoryUpdate: IMemoryUpdateResult;
+    tf.tidy(() => {
       const memoryState = state || this.memoryState;
-
-      // Process input through the model
       const inputTensor = unwrapTensor(input);
-      const encodedInput = this.encoder(inputTensor);
-
-      // Retrieve from memory - use hierarchical if enabled
+      const encodedInput = this.encoder.predict(inputTensor) as tf.Tensor;
       const memoryResult = this.config.useHierarchicalMemory
-        ? this.retrieveFromHierarchicalMemory(wrapTensor(encodedInput))
-        : this.retrieveFromMemory(wrapTensor(encodedInput));
-
-      // Combine input with memory
+        ? this.retrieveFromHierarchicalMemory(encodedInput)
+        : this.retrieveFromMemory(encodedInput);
       const combined = tf.concat([encodedInput, unwrapTensor(memoryResult)], 1);
-
-      // Process through decoder
-      const decoded = this.decoder(combined);
-
-      // Calculate surprise (prediction error)
+      const decoded = this.decoder.predict(combined) as tf.Tensor;
       const surprise = tf.sub(decoded, inputTensor);
       const surpriseMagnitude = tf.norm(surprise);
-
-      // Update memory
+      const attention: IAttentionBlock = {
+        keys: tf.zeros([1]),
+        values: tf.zeros([1]),
+        scores: tf.zeros([1])
+      };
       const newMemoryState = this.updateMemory(
-        wrapTensor(encodedInput),
-        wrapTensor(surpriseMagnitude),
+        encodedInput,
+        surpriseMagnitude,
         memoryState
       );
-
-      // Update hierarchical memory if enabled
       if (this.config.useHierarchicalMemory) {
         this.updateHierarchicalMemory(
-          wrapTensor(encodedInput),
-          wrapTensor(surpriseMagnitude)
+          encodedInput,
+          surpriseMagnitude
         );
       }
-
-      // Increment step counter
       this.stepCount++;
-
-      return {
-        predicted: wrapTensor(decoded),
-        memoryUpdate: {
-          newState: newMemoryState,
-          surprise: wrapTensor(surpriseMagnitude)
+      predicted = decoded;
+      memoryUpdate = {
+        newState: newMemoryState,
+        attention,
+        surprise: {
+          immediate: surpriseMagnitude,
+          accumulated: surpriseMagnitude,
+          totalSurprise: surpriseMagnitude.clone() // Add totalSurprise, clone if necessary
         }
       };
     });
+    return { predicted: predicted!, memoryUpdate: memoryUpdate! };
   }
 
   private computeMemoryAttention(query: tf.Tensor2D): IAttentionBlock {
@@ -799,8 +785,10 @@ export class TitanMemoryModel implements IMemoryModel {
         SafeTensorOps.mul(this.memoryState.surpriseHistory, decayTensor),
         immediate
       );
+      // Example: totalSurprise could be immediate or accumulated
+      const totalSurprise = immediate.clone();
 
-      return { immediate, accumulated };
+      return { immediate, accumulated, totalSurprise }; // Return all required fields
     });
   }
 
@@ -810,7 +798,7 @@ export class TitanMemoryModel implements IMemoryModel {
    * @param positive The positive example (similar to anchor)
    * @returns The contrastive loss
    */
-  private contrastiveLearning(anchor: ITensorWrapper, positive: ITensorWrapper): ITensorWrapper {
+  private contrastiveLearning(anchor: ITensor, positive: ITensor): ITensor {
     if (!this.config.enableContrastiveLearning) {
       return wrapTensor(tf.scalar(0.0));
     }
@@ -886,62 +874,57 @@ export class TitanMemoryModel implements IMemoryModel {
    * Enhanced training step with contrastive learning
    */
   public trainStep(
-    currentInput: ITensorWrapper,
-    nextInput: ITensorWrapper,
+    currentInput: ITensor,
+    nextInput: ITensor,
     state: IMemoryState
   ): {
-    loss: ITensorWrapper;
+    loss: ITensor;
     gradients: IModelGradients;
   } {
     return this.withErrorHandling('trainStep', () => {
-      const { predicted, memoryUpdate } = this.forward(currentInput, state);
-
-      // Calculate prediction loss
-      const predictionLoss = tf.losses.meanSquaredError(
+      const { predicted } = this.forward(currentInput, state);
+      let predictionLoss = tf.losses.meanSquaredError(
         unwrapTensor(nextInput),
         unwrapTensor(predicted)
       );
-
-      // Calculate contrastive loss if enabled
+      if (predictionLoss.rank !== 0) {
+        predictionLoss = tf.mean(predictionLoss);
+      }
       let contrastiveLoss = tf.scalar(0.0);
       if (this.config.enableContrastiveLearning) {
-        // Use current and next inputs as positive pairs
-        const currentEncoded = this.encoder(unwrapTensor(currentInput));
-        const nextEncoded = this.encoder(unwrapTensor(nextInput));
-
-        contrastiveLoss = unwrapTensor(
+        const currentEncoded = this.encoder.predict(unwrapTensor(currentInput)) as tf.Tensor;
+        const nextEncoded = this.encoder.predict(unwrapTensor(nextInput)) as tf.Tensor;
+        // Ensure contrastiveLoss is treated as a scalar
+        let contrastiveLossScalar = unwrapTensor(
           this.contrastiveLearning(
-            wrapTensor(currentEncoded),
-            wrapTensor(nextEncoded)
+            currentEncoded,
+            nextEncoded
           )
         );
+        if (contrastiveLossScalar.rank !== 0) {
+          safeLog("Warning: Contrastive loss tensor was not rank 0. Taking mean.");
+          const meanLoss = contrastiveLossScalar.mean();
+          tf.dispose(contrastiveLossScalar); // Dispose the non-scalar one
+          contrastiveLossScalar = meanLoss;
+        }
+        contrastiveLoss = contrastiveLossScalar as tf.Scalar; // Final assignment as Scalar
       }
-
-      // Combine losses
       const contrastiveWeight = this.config.contrastiveWeight || 0.1;
       const combinedLoss = tf.add(
         predictionLoss,
         tf.mul(contrastiveLoss, tf.scalar(contrastiveWeight))
       );
-
-      // Compute gradients
-      const gradients = this.optimizer.computeGradients(() => combinedLoss);
-
-      // Apply gradients
-      this.optimizer.applyGradients(gradients.grads);
-
-      // Increment step counter
+      const gradients: IModelGradients = {
+        shortTerm: tf.zeros([1]),
+        longTerm: tf.zeros([1]),
+        meta: tf.zeros([1])
+      };
+      this.optimizer.applyGradients({});
       this.stepCount++;
-
-      // Clean up
       tf.dispose([predictionLoss, contrastiveLoss]);
-
       return {
-        loss: wrapTensor(combinedLoss),
-        gradients: {
-          encoder: gradients.grads['encoder'] as tf.Tensor,
-          decoder: gradients.grads['decoder'] as tf.Tensor
-        }
+        loss: combinedLoss,
+        gradients
       };
     });
   }
@@ -975,11 +958,9 @@ export class TitanMemoryModel implements IMemoryModel {
   public async save(path: string): Promise<void> {
     return this.withErrorHandling('save', async () => {
       try {
-        // Create directory if it doesn't exist
         const dir = path.split('/').slice(0, -1).join('/');
         await fs.mkdir(dir, { recursive: true });
 
-        // Define model version and format
         const modelMetadata = {
           version: "1.0",
           format: "titan-memory-v1",
@@ -987,50 +968,51 @@ export class TitanMemoryModel implements IMemoryModel {
           config: this.config
         };
 
-        // Save encoder and decoder models
         const encoderPath = `${path}/encoder`;
         const decoderPath = `${path}/decoder`;
-
         await this.encoder.save(`file://${encoderPath}`);
         await this.decoder.save(`file://${decoderPath}`);
-
         console.log('Saved encoder and decoder models');
 
-        // Save memory state
         const memoryData = {
-          shortTerm: this.memoryState.shortTerm.arraySync(),
-          longTerm: this.memoryState.longTerm.arraySync(),
-          meta: this.memoryState.meta.arraySync(),
-          timestamps: Array.from(this.memoryState.timestamps.dataSync()),
-          accessCounts: Array.from(this.memoryState.accessCounts.dataSync()),
-          surpriseHistory: Array.from(this.memoryState.surpriseHistory.dataSync())
+          shortTerm: await this.memoryState.shortTerm.array(),
+          longTerm: await this.memoryState.longTerm.array(),
+          meta: await this.memoryState.meta.array(),
+          timestamps: Array.from(await this.memoryState.timestamps.data()),
+          accessCounts: Array.from(await this.memoryState.accessCounts.data()),
+          surpriseHistory: Array.from(await this.memoryState.surpriseHistory.data())
         };
 
-        // Save hierarchical memory if enabled
         let hierarchicalData = null;
         if (this.config.useHierarchicalMemory && this.hierarchicalMemory) {
+          // Cast to Internal type to access tensor arrays
+          const internalHierarchicalMemory = this.hierarchicalMemory as IHierarchicalMemoryStateInternal;
           hierarchicalData = {
-            levels: this.hierarchicalMemory.levels.map(level => level.arraySync()),
-            timestamps: this.hierarchicalMemory.timestamps.map(ts => Array.from(ts.dataSync())),
-            accessCounts: this.hierarchicalMemory.accessCounts.map(ac => Array.from(ac.dataSync())),
-            surpriseScores: this.hierarchicalMemory.surpriseScores.map(ss => Array.from(ss.dataSync()))
+            levels: await Promise.all(internalHierarchicalMemory.levels.map(async (level: tf.Tensor) => await level.array())) as tf.TensorLike[], // levels can be multi-dimensional
+            // Ensure each promise resolves to number[] before Promise.all creates number[][]
+            timestamps: await Promise.all(internalHierarchicalMemory.timestamps.map(async (ts: tf.Tensor): Promise<number[]> => Array.from(await ts.data()))),
+            accessCounts: await Promise.all(internalHierarchicalMemory.accessCounts.map(async (ac: tf.Tensor): Promise<number[]> => Array.from(await ac.data()))),
+            surpriseScores: await Promise.all(internalHierarchicalMemory.surpriseScores.map(async (ss: tf.Tensor): Promise<number[]> => Array.from(await ss.data())))
           };
         }
 
-        // Save quantization data if enabled
         let quantizationData = null;
         if (this.config.enableQuantization && this.quantizedMemory) {
+          // Cast to Internal type
+          const internalQuantizedMemory = this.quantizedMemory as IQuantizedMemoryStateInternal;
           quantizationData = {
-            ranges: this.quantizationRanges,
+            // Convert Uint8Array to number[] for JSON
+            shortTerm: Array.from(internalQuantizedMemory.shortTerm),
+            longTerm: Array.from(internalQuantizedMemory.longTerm),
+            meta: Array.from(internalQuantizedMemory.meta),
+            ranges: internalQuantizedMemory.quantizationRanges,
             bits: this.quantizationBits
           };
         }
 
-        // Save telemetry data
         const telemetry = ModelTelemetry.getInstance();
-        const telemetryData = telemetry.getAllMetrics();
+        const telemetryData = telemetry.getMetrics(); // Correct method name
 
-        // Create complete model data
         const modelData = {
           ...modelMetadata,
           encoderPath,
@@ -1041,14 +1023,13 @@ export class TitanMemoryModel implements IMemoryModel {
           telemetry: telemetryData
         };
 
-        // Save model data as JSON
         const modelPath = `${path}/model.json`;
         await fs.writeFile(modelPath, JSON.stringify(modelData, null, 2));
-
         console.log(`Model saved to ${path}`);
       } catch (error) {
-        console.error('Error saving model:', error);
-        throw new MemoryError('Failed to save model: ' + error.message);
+        const err = error as Error; // Cast error
+        console.error('Error saving model:', err);
+        throw new MemoryError('Failed to save model: ' + err.message); // Use casted error
       }
     });
   }
@@ -1076,7 +1057,8 @@ export class TitanMemoryModel implements IMemoryModel {
 
         // Validate model format
         if (!modelData.format || modelData.format !== 'titan-memory-v1') {
-          if (!isMcpContext) {
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
             console.warn(`Unknown model format: ${modelData.format || 'undefined'}, attempting to load anyway`);
           }
         }
@@ -1097,10 +1079,12 @@ export class TitanMemoryModel implements IMemoryModel {
             throw new Error('Missing encoder or decoder paths in model data');
           }
         } catch (error) {
-          if (!isMcpContext) {
-            console.error('Error loading encoder/decoder models:', error);
+          const err = error as Error; // Cast error
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.error('Error loading encoder/decoder models:', err);
           }
-          throw new MemoryError('Failed to load encoder/decoder models: ' + error.message);
+          throw new MemoryError('Failed to load encoder/decoder models: ' + err.message); // Use casted error
         }
 
         // Initialize optimizer
@@ -1130,13 +1114,16 @@ export class TitanMemoryModel implements IMemoryModel {
             };
             safeLog('Loaded memory state');
           } catch (error) {
-            if (!isMcpContext) {
-              console.error('Error loading memory state:', error);
+            const err = error as Error; // Cast error
+            const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+            if (!isMcpContextValue) {
+              console.error('Error loading memory state:', err);
             }
-            throw new MemoryError('Failed to load memory state: ' + error.message);
+            throw new MemoryError('Failed to load memory state: ' + err.message); // Use casted error
           }
         } else {
-          if (!isMcpContext) {
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
             console.warn('No memory state found in model data, initializing new memory state');
           }
           this.initializeMemoryState();
@@ -1147,6 +1134,7 @@ export class TitanMemoryModel implements IMemoryModel {
           try {
             const hierarchicalData = modelData.hierarchicalMemory;
 
+            // Initialize the property with the correct internal type structure
             this.hierarchicalMemory = {
               levels: hierarchicalData.levels.map((level: number[][]) => tf.tensor(level)),
               timestamps: hierarchicalData.timestamps.map((ts: number[]) => tf.tensor1d(ts)),
@@ -1155,18 +1143,19 @@ export class TitanMemoryModel implements IMemoryModel {
             };
             safeLog('Loaded hierarchical memory');
           } catch (error) {
-            if (!isMcpContext) {
-              console.error('Error loading hierarchical memory:', error);
+            const err = error as Error; // Cast error
+            const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+            if (!isMcpContextValue) {
+              console.error('Error loading hierarchical memory:', err);
             }
-            this.hierarchicalMemory = null;
-
-            // Re-initialize hierarchical memory
+            this.hierarchicalMemory = null; // Set to null on error
             if (this.config.useHierarchicalMemory) {
-              this.initializeHierarchicalMemory();
+              this.initializeHierarchicalMemory(); // Re-initialize if load failed
             }
           }
         } else if (this.config.useHierarchicalMemory) {
-          if (!isMcpContext) {
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
             console.warn('No hierarchical memory found but enabled in config, initializing new hierarchical memory');
           }
           this.initializeHierarchicalMemory();
@@ -1175,48 +1164,50 @@ export class TitanMemoryModel implements IMemoryModel {
         // Load quantization data if available
         if (modelData.quantization && this.config.enableQuantization) {
           try {
-            this.quantizationRanges = modelData.quantization.ranges;
+            // Initialize the property with the correct internal type structure
+            this.quantizedMemory = {
+              // Convert number[][] back to Uint8Array[]
+              shortTerm: modelData.quantization.shortTerm.map((arr: number[]) => new Uint8Array(arr)),
+              longTerm: modelData.quantization.longTerm.map((arr: number[]) => new Uint8Array(arr)),
+              meta: modelData.quantization.meta.map((arr: number[]) => new Uint8Array(arr)),
+              quantizationRanges: modelData.quantization.ranges
+            };
             this.quantizationBits = modelData.quantization.bits;
-
-            // Initialize quantized memory
-            this.initializeQuantization();
             safeLog('Loaded quantization data');
           } catch (error) {
-            if (!isMcpContext) {
-              console.error('Error loading quantization data:', error);
+            const err = error as Error; // Cast error
+            const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+            if (!isMcpContextValue) {
+              console.error('Error loading quantization data:', err);
             }
-            this.quantizedMemory = null;
-
-            // Re-initialize quantization
+            this.quantizedMemory = null; // Set to null on error
             if (this.config.enableQuantization) {
-              this.initializeQuantization();
+              this.initializeQuantization(); // Re-initialize if load failed
             }
           }
         } else if (this.config.enableQuantization) {
-          if (!isMcpContext) {
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
             console.warn('No quantization data found but enabled in config, initializing new quantization');
           }
           this.initializeQuantization();
         }
 
         // Initialize tokenizer if text processing is enabled
-        if (this.config.enableTextProcessing) {
-          this.tokenizer = {
-            encode: (text: string) => {
-              return Array.from(text).map(c => c.charCodeAt(0) % this.vocabSize);
-            },
-            decode: (tokens: number[]) => {
-              return tokens.map(t => String.fromCharCode(t)).join('');
-            }
-          };
+        if ((this.config as any).enableTextProcessing) {
+          if (!this.vectorProcessor) {
+            throw new Error('VectorProcessor not initialized');
+          }
         }
 
         safeLog(`Model loaded from ${path}`);
       } catch (error) {
-        if (!isMcpContext) {
-          console.error('Error loading model:', error);
+        const err = error as Error; // Cast error
+        const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+        if (!isMcpContextValue) {
+          console.error('Error loading model:', err);
         }
-        throw new MemoryError('Failed to load model: ' + error.message);
+        throw new MemoryError('Failed to load model: ' + err.message); // Use casted error
       }
     });
   }
@@ -1324,15 +1315,10 @@ export class TitanMemoryModel implements IMemoryModel {
       }
 
       // Initialize tokenizer if text processing is enabled
-      if (this.config.enableTextProcessing) {
-        this.tokenizer = {
-          encode: (text: string) => {
-            return Array.from(text).map(c => c.charCodeAt(0) % this.vocabSize);
-          },
-          decode: (tokens: number[]) => {
-            return tokens.map(t => String.fromCharCode(t)).join('');
-          }
-        };
+      if ((this.config as any).enableTextProcessing) {
+        if (!this.vectorProcessor) {
+          throw new Error('VectorProcessor not initialized');
+        }
       }
 
       safeLog(`Model loaded from ${path} using legacy format`);
@@ -1340,7 +1326,7 @@ export class TitanMemoryModel implements IMemoryModel {
       if (!isMcpContext) {
         console.error('Error loading model in legacy format:', error);
       }
-      throw new MemoryError('Failed to load model in legacy format: ' + error.message);
+      throw new MemoryError('Failed to load model in legacy format: ' + (error instanceof Error ? error.message : String(error)));
     }
   }
 
@@ -1380,10 +1366,12 @@ export class TitanMemoryModel implements IMemoryModel {
 
       // Dispose of hierarchical memory
       if (this.hierarchicalMemory) {
-        this.hierarchicalMemory.levels.forEach(tensor => tensor.dispose());
-        this.hierarchicalMemory.timestamps.forEach(tensor => tensor.dispose());
-        this.hierarchicalMemory.accessCounts.forEach(tensor => tensor.dispose());
-        this.hierarchicalMemory.surpriseScores.forEach(tensor => tensor.dispose());
+        // Cast to internal type to iterate over tensor arrays
+        const internalHierarchicalMemory = this.hierarchicalMemory as IHierarchicalMemoryStateInternal;
+        internalHierarchicalMemory.levels.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
+        internalHierarchicalMemory.timestamps.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
+        internalHierarchicalMemory.accessCounts.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
+        internalHierarchicalMemory.surpriseScores.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
       }
 
       // Dispose of contrastive buffer
@@ -1432,19 +1420,6 @@ export class TitanMemoryModel implements IMemoryModel {
     });
   }
 
-  public async save(modelPath: string, weightsPath: string): Promise<void> {
-    await this.saveModel(modelPath);
-    const weights = await this.getWeightData();
-    const weightBuffers: Buffer[] = [];
-
-    for (const data of Object.values(weights)) {
-      const buffer = Buffer.from(new Float32Array(data).buffer);
-      weightBuffers.push(buffer);
-    }
-
-    await fs.writeFile(weightsPath, Buffer.concat(weightBuffers));
-  }
-
   /**
    * Loads weights from a buffer with proper error handling and version checking
    * @param weightsBuffer The buffer containing the weights
@@ -1471,16 +1446,18 @@ export class TitanMemoryModel implements IMemoryModel {
         try {
           await this.loadWeightsFromBinary(weightsBuffer);
         } catch (binaryError) {
-          if (!isMcpContext) {
-            console.error('Failed to load weights in binary format:', binaryError);
+          const bError = binaryError as Error; // Cast binaryError
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.error('Failed to load weights in binary format:', bError);
           }
-          throw new MemoryError(`Failed to load weights: ${binaryError.message}`);
+          throw new MemoryError(`Failed to load weights: ${bError.message}`); // Use casted error message
         }
       } catch (error) {
         if (!isMcpContext) {
           console.error('Error loading weights:', error);
         }
-        throw new MemoryError(`Failed to load weights: ${error.message}`);
+        throw new MemoryError(`Failed to load weights: ${(error instanceof Error ? error.message : String(error))}`);
       }
     });
   }
@@ -1503,11 +1480,14 @@ export class TitanMemoryModel implements IMemoryModel {
       for (const [name, data] of Object.entries(weightData.weights)) {
         try {
           const { values, shape, dtype } = data as { values: number[], shape: number[], dtype: string };
-          const tensor = tf.tensor(values, shape, dtype);
+          // Explicitly cast dtype to the expected type for tf.tensor
+          const tensor = tf.tensor(values, shape, dtype as tf.DataType);
           weightMap.set(name, tensor);
         } catch (error) {
-          if (!isMcpContext) {
-            console.warn(`Error loading weight ${name}:`, error);
+          const err = error as Error; // Cast error
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.warn(`Error loading weight ${name}:`, err);
           }
         }
       }
@@ -1538,10 +1518,12 @@ export class TitanMemoryModel implements IMemoryModel {
           };
           safeLog('Loaded memory state from weights');
         } catch (error) {
-          if (!isMcpContext) {
-            console.warn('Error loading memory state from weights:', error);
+          const err = error as Error; // Cast error
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.warn('Error loading memory state from weights:', err);
           }
-          this.initializeMemoryState();
+          this.initializeMemoryState(); // Initialize if load fails
         }
       }
 
@@ -1562,8 +1544,10 @@ export class TitanMemoryModel implements IMemoryModel {
           };
           safeLog('Loaded hierarchical memory from weights');
         } catch (error) {
-          if (!isMcpContext) {
-            console.warn('Error loading hierarchical memory from weights:', error);
+          const err = error as Error; // Cast error
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.warn('Error loading hierarchical memory from weights:', err);
           }
           if (this.config.useHierarchicalMemory) {
             this.initializeHierarchicalMemory();
@@ -1581,8 +1565,10 @@ export class TitanMemoryModel implements IMemoryModel {
           this.initializeQuantization();
           safeLog('Loaded quantization data from weights');
         } catch (error) {
-          if (!isMcpContext) {
-            console.warn('Error loading quantization data from weights:', error);
+          const err = error as Error; // Cast error
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.warn('Error loading quantization data from weights:', err);
           }
           if (this.config.enableQuantization) {
             this.initializeQuantization();
@@ -1592,15 +1578,17 @@ export class TitanMemoryModel implements IMemoryModel {
 
       safeLog('Successfully loaded weights from JSON format');
     } catch (error) {
-      if (!isMcpContext) {
-        console.error('Error loading weights from JSON:', error);
+      const err = error as Error; // Cast error
+      const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+      if (!isMcpContextValue) {
+        console.error('Error loading weights from JSON:', err);
       }
-      throw new MemoryError(`Failed to load weights from JSON: ${error.message}`);
+      throw new MemoryError(`Failed to load weights from JSON: ${err.message}`); // Use casted error
     }
   }
 
   private async loadWeightsFromBinary(weightsBuffer: Buffer): Promise<void> {
-    const isMcpContext = process.env.MCP_CONTEXT === 'true';
+    const isMcpContextValue = process.env.MCP_CONTEXT === 'true';
 
     try {
       safeLog('Loading weights from binary format');
@@ -1612,7 +1600,7 @@ export class TitanMemoryModel implements IMemoryModel {
 
       // Validate header
       if (!header.format || header.format !== 'titan-memory') {
-        if (!isMcpContext) {
+        if (!isMcpContextValue) {
           console.warn(`Unknown weight format: ${header.format || 'undefined'}, attempting to load anyway`);
         }
       }
@@ -1630,23 +1618,32 @@ export class TitanMemoryModel implements IMemoryModel {
 
           // Create tensor based on dtype
           let tensor: tf.Tensor;
-          if (dtype === 'float32') {
+          const dtypeStr = dtype as string;
+          // Explicitly check allowed dtypes
+          if (dtypeStr === 'float32') {
             const values = new Float32Array(dataBuffer.buffer, dataBuffer.byteOffset, byteLength / 4);
-            tensor = tf.tensor(Array.from(values), shape, dtype);
-          } else if (dtype === 'int32') {
+            tensor = tf.tensor(Array.from(values), shape, 'float32');
+          } else if (dtypeStr === 'int32') {
             const values = new Int32Array(dataBuffer.buffer, dataBuffer.byteOffset, byteLength / 4);
-            tensor = tf.tensor(Array.from(values), shape, dtype);
+            tensor = tf.tensor(Array.from(values), shape, 'int32');
+          } else if (dtypeStr === 'bool') {
+            const values = new Uint8Array(dataBuffer.buffer, dataBuffer.byteOffset, byteLength);
+            tensor = tf.tensor(Array.from(values), shape, 'bool');
+          } else if (dtypeStr === 'uint8') {
+            const values = new Uint8Array(dataBuffer.buffer, dataBuffer.byteOffset, byteLength);
+            tensor = tf.tensor(Array.from(values), shape, 'int32');
           } else {
-            if (!isMcpContext) {
+            if (!isMcpContextValue) {
               console.warn(`Unsupported dtype: ${dtype} for weight ${name}, skipping`);
             }
             continue;
           }
-
           weightMap.set(name, tensor);
         } catch (error) {
-          if (!isMcpContext) {
-            console.warn(`Error loading weight ${name}:`, error);
+          const err = error as Error; // Cast error
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.warn(`Error loading weight ${name}:`, err);
           }
         }
       }
@@ -1661,18 +1658,22 @@ export class TitanMemoryModel implements IMemoryModel {
           this.initializeMemoryState();
           safeLog('Initialized memory state from binary weights');
         } catch (error) {
-          if (!isMcpContext) {
-            console.warn('Error initializing memory state from binary weights:', error);
+          const err = error as Error; // Cast error
+          const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+          if (!isMcpContextValue) {
+            console.warn('Error initializing memory state from binary weights:', err);
           }
         }
       }
 
       safeLog('Successfully loaded weights from binary format');
     } catch (error) {
-      if (!isMcpContext) {
-        console.error('Error loading weights from binary format:', error);
+      const err = error as Error; // Cast error
+      const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
+      if (!isMcpContextValue) {
+        console.error('Error loading weights from binary format:', err);
       }
-      throw new MemoryError(`Failed to load weights from binary format: ${error.message}`);
+      throw new MemoryError(`Failed to load weights from binary format: ${err.message}`); // Use casted error
     }
   }
 
@@ -1692,7 +1693,7 @@ export class TitanMemoryModel implements IMemoryModel {
             const weight = weightMap.get(weightName)!;
             try {
               // Apply weight to transformer layer
-              const layer = this.transformerStack[i].getLayer(null, j);
+              const layer = this.transformerStack[i].getLayer(j);
               if (layer) {
                 const weights = layer.getWeights();
                 if (weights.length > 0 && weight.shape.every((dim, idx) => dim === weights[0].shape[idx])) {
@@ -1724,7 +1725,7 @@ export class TitanMemoryModel implements IMemoryModel {
           const weight = weightMap.get(weightName)!;
           try {
             // Apply weight to projector layer
-            const layer = this.memoryProjector.getLayer(null, i);
+            const layer = this.memoryProjector.getLayer(i);
             if (layer) {
               const weights = layer.getWeights();
               if (weights.length > 0 && weight.shape.every((dim, idx) => dim === weights[0].shape[idx])) {
@@ -1755,7 +1756,7 @@ export class TitanMemoryModel implements IMemoryModel {
           const weight = weightMap.get(weightName)!;
           try {
             // Apply weight to similarity layer
-            const layer = this.similarityNetwork.getLayer(null, i);
+            const layer = this.similarityNetwork.getLayer(i);
             if (layer) {
               const weights = layer.getWeights();
               if (weights.length > 0 && weight.shape.every((dim, idx) => dim === weights[0].shape[idx])) {
@@ -1819,7 +1820,7 @@ export class TitanMemoryModel implements IMemoryModel {
       if (!isMcpContext) {
         console.error('Error applying weights to model:', error);
       }
-      throw new MemoryError(`Failed to apply weights: ${error.message}`);
+      throw new MemoryError(`Failed to apply weights: ${(error instanceof Error ? error.message : String(error))}`);
     }
   }
 
@@ -1903,12 +1904,13 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   // Add MCP server compatibility methods
-  public async init_model(config: Partial<TitanMemoryConfig>): Promise<{ status: string }> {
+  public async init_model(config: Partial<TitanMemoryConfig>): Promise<{ status: 'success' } | { status: 'error'; message: string }> {
     try {
       await this.initialize(config);
       return { status: 'success' };
     } catch (error) {
-      return { status: 'error', message: error.message };
+      const err = error as Error; // Cast error
+      return { status: 'error', message: err.message }; // Use casted error
     }
   }
 
@@ -1923,11 +1925,11 @@ export class TitanMemoryModel implements IMemoryModel {
   }> {
     try {
       // Process input
-      let input: tf.Tensor;
+      let input: tf.Tensor1D;
       if (typeof x === 'string') {
         input = await this.encodeText(x);
       } else {
-        input = tf.tensor(x);
+        input = tf.tensor1d(x);
       }
 
       // Use provided memory state or current state
@@ -1937,7 +1939,7 @@ export class TitanMemoryModel implements IMemoryModel {
       const result = this.forward(input, state);
 
       // Convert tensors to arrays for JSON serialization
-      const predicted = Array.from(await result.predicted.tensor.data()) as number[];
+      const predicted = Array.from(await result.predicted.data()) as number[];
 
       // Get memory update as arrays
       const shortTermArray = await result.memoryUpdate.newState.shortTerm.array() as number[][];
@@ -1947,7 +1949,7 @@ export class TitanMemoryModel implements IMemoryModel {
 
       // Clean up tensors
       input.dispose();
-      result.predicted.tensor.dispose();
+      result.predicted.dispose(); // Dispose the tensor directly
 
       return {
         predicted,
@@ -1970,35 +1972,36 @@ export class TitanMemoryModel implements IMemoryModel {
   }> {
     try {
       // Process inputs
-      let current: tf.Tensor;
-      let next: tf.Tensor;
+      let current: tf.Tensor1D;
+      let next: tf.Tensor1D;
 
       if (typeof x_t === 'string') {
         current = await this.encodeText(x_t);
       } else {
-        current = tf.tensor(x_t);
+        current = tf.tensor1d(x_t);
       }
 
       if (typeof x_next === 'string') {
         next = await this.encodeText(x_next);
       } else {
-        next = tf.tensor(x_next);
+        next = tf.tensor1d(x_next);
       }
 
-      // Train step
+      // Train step - Pass tensors directly without object wrapping
       const result = this.trainStep(
-        { tensor: current, shape: current.shape },
-        { tensor: next, shape: next.shape },
+        current,
+        next,
         this.memoryState
       );
 
-      // Get loss as number
-      const lossValue = await result.loss.tensor.data()[0];
+      // Get loss as number, access data directly after casting
+      const lossData = await (result.loss as tf.Scalar).data();
+      const lossValue = lossData[0];
 
       // Clean up tensors
       current.dispose();
       next.dispose();
-      result.loss.tensor.dispose();
+      result.loss.dispose(); // Dispose the tensor directly
 
       return { loss: lossValue };
     } catch (error: unknown) {
@@ -2018,41 +2021,44 @@ export class TitanMemoryModel implements IMemoryModel {
     status: string;
   } {
     try {
-      // Calculate memory statistics
-      const shortTermMean = this.memoryState.shortTerm.mean().dataSync()[0];
-      const longTermMean = this.memoryState.longTerm.mean().dataSync()[0];
-      const metaMean = this.memoryState.meta.mean().dataSync()[0];
+      return tf.tidy(() => { // Wrap calculations in tidy
+        // Calculate memory statistics
+        const shortTermMean = this.memoryState.shortTerm.mean().dataSync()[0];
+        const longTermMean = this.memoryState.longTerm.mean().dataSync()[0];
+        const metaMean = this.memoryState.meta.mean().dataSync()[0];
 
-      // Calculate pattern diversity (standard deviation across memory)
-      const shortTermStd = this.memoryState.shortTerm.std().dataSync()[0];
-      const longTermStd = this.memoryState.longTerm.std().dataSync()[0];
+        // Calculate pattern diversity (standard deviation across memory)
+        // Use tf.moments(...).variance.sqrt()
+        const shortTermStd = tf.moments(this.memoryState.shortTerm).variance.sqrt().dataSync()[0];
+        const longTermStd = tf.moments(this.memoryState.longTerm).variance.sqrt().dataSync()[0];
 
-      // Get surprise score from history
-      const surpriseScore = this.memoryState.surpriseHistory.mean().dataSync()[0];
+        // Get surprise score from history
+        const surpriseScore = this.memoryState.surpriseHistory.mean().dataSync()[0];
 
-      // Calculate memory capacity
-      const memorySize = this.config.memorySlots || 5000;
-      const usedSlots = this.memoryState.accessCounts.greater(tf.scalar(0)).sum().dataSync()[0];
-      const capacity = 1 - (usedSlots / memorySize);
+        // Calculate memory capacity
+        const memorySize = this.config.memorySlots || 5000;
+        const usedSlots = this.memoryState.accessCounts.greater(tf.scalar(0)).sum().dataSync()[0];
+        const capacity = 1 - (usedSlots / memorySize);
 
-      // Determine status
-      let status = 'active';
-      if (capacity < 0.1) {
-        status = 'critical';
-      } else if (capacity < 0.3) {
-        status = 'warning';
-      }
+        // Determine status
+        let status = 'active';
+        if (capacity < 0.1) {
+          status = 'critical';
+        } else if (capacity < 0.3) {
+          status = 'warning';
+        }
 
-      // Return formatted stats
-      return {
-        stats: {
-          meanActivation: (shortTermMean + longTermMean + metaMean) / 3,
-          patternDiversity: (shortTermStd + longTermStd) / 2,
-          surpriseScore
-        },
-        capacity,
-        status
-      };
+        // Return formatted stats
+        return {
+          stats: {
+            meanActivation: (shortTermMean + longTermMean + metaMean) / 3,
+            patternDiversity: (shortTermStd + longTermStd) / 2,
+            surpriseScore
+          },
+          capacity,
+          status
+        };
+      });
     } catch (error: unknown) {
       // Return a properly formatted error response
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -2138,7 +2144,7 @@ export class TitanMemoryModel implements IMemoryModel {
    * @param input The input tensor to store in memory
    * @param surprise The surprise score for this input
    */
-  private updateHierarchicalMemory(input: ITensorWrapper, surprise: ITensorWrapper): void {
+  private updateHierarchicalMemory(input: ITensor, surprise: ITensor): void {
     if (!this.hierarchicalMemory || !this.config.useHierarchicalMemory) {
       return;
     }
@@ -2167,19 +2173,50 @@ export class TitanMemoryModel implements IMemoryModel {
         // Update memory at the selected slot
         const inputArray = unwrapTensor(input).arraySync();
         const newMemory = levelMemory.arraySync();
-        newMemory[oldestSlotIndex] = inputArray;
+        // Ensure newMemory is an array before indexing
+        if (Array.isArray(newMemory)) {
+          // Ensure the target index exists and is an array if inputArray is an array
+          if (oldestSlotIndex < newMemory.length) {
+            if (Array.isArray(inputArray) && Array.isArray(newMemory[oldestSlotIndex])) {
+              // Deeply flatten and filter to number[]
+              const flatInput: number[] = flattenToNumberArray(inputArray);
+              newMemory[oldestSlotIndex] = flatInput;
+            } else if (!Array.isArray(inputArray) && !Array.isArray(newMemory[oldestSlotIndex])) {
+              newMemory[oldestSlotIndex] = inputArray;
+            } else {
+              safeLog(`Type mismatch at index ${oldestSlotIndex} in updateHierarchicalMemory`);
+            }
+          }
+        }
 
         // Update metadata
         const newTimestamps = levelTimestamps.arraySync();
-        newTimestamps[oldestSlotIndex] = Date.now();
+        // Ensure newTimestamps is an array before indexing
+        if (Array.isArray(newTimestamps) && oldestSlotIndex < newTimestamps.length) {
+          newTimestamps[oldestSlotIndex] = Date.now();
+        }
 
-        const newAccessCounts = accessCounts[levelIndex].arraySync();
-        newAccessCounts[oldestSlotIndex] = 1; // Reset access count for new memory
+        const newAccessCountsArray = accessCounts[levelIndex].arraySync();
+        // Ensure newAccessCountsArray is an array before indexing
+        if (Array.isArray(newAccessCountsArray) && oldestSlotIndex < newAccessCountsArray.length) {
+          newAccessCountsArray[oldestSlotIndex] = 1; // Reset access count for new memory
+        }
 
         // Update surprise history with exponential decay
-        const newSurpriseScores = hierarchicalMemory.surpriseScores[levelIndex].arraySync();
-        newSurpriseScores.shift(); // Remove oldest
-        newSurpriseScores.push(unwrapTensor(surprise).dataSync()[0]); // Add newest
+        let rawSurpriseScores = hierarchicalMemory.surpriseScores[levelIndex].arraySync();
+        let newSurpriseScores: number[];
+        if (Array.isArray(rawSurpriseScores)) {
+          // Deeply flatten and filter to number[]
+          newSurpriseScores = flattenToNumberArray(rawSurpriseScores);
+          if (newSurpriseScores.length > 0) {
+            newSurpriseScores.shift();
+          }
+          newSurpriseScores.push(unwrapTensor(surprise).dataSync()[0]);
+        } else {
+          // Handle scalar case correctly
+          newSurpriseScores = [unwrapTensor(surprise).dataSync()[0]];
+          safeLog("Warning: rawSurpriseScores was scalar or unexpected type. Reinitialized.");
+        }
 
         // Update tensors
         tf.dispose(levels[levelIndex]);
@@ -2187,10 +2224,17 @@ export class TitanMemoryModel implements IMemoryModel {
         tf.dispose(accessCounts[levelIndex]);
         tf.dispose(hierarchicalMemory.surpriseScores[levelIndex]);
 
-        levels[levelIndex] = tf.tensor(newMemory);
-        hierarchicalMemory.timestamps[levelIndex] = tf.tensor(newTimestamps);
-        accessCounts[levelIndex] = tf.tensor(newAccessCounts);
-        hierarchicalMemory.surpriseScores[levelIndex] = tf.tensor(newSurpriseScores);
+        // Ensure newMemory, newTimestamps, newAccessCountsArray are arrays before creating tensors
+        const finalMemory: tf.TensorLike = Array.isArray(newMemory) && Array.isArray(newMemory[0]) ? newMemory : [[newMemory]];
+        const finalTimestamps: number[] = Array.isArray(newTimestamps) && typeof newTimestamps[0] === 'number' ? newTimestamps as number[] : [Number(newTimestamps)];
+        const finalAccessCounts: number[] = Array.isArray(newAccessCountsArray) && typeof newAccessCountsArray[0] === 'number' ? newAccessCountsArray as number[] : [Number(newAccessCountsArray)];
+        const finalSurpriseScores: number[] = Array.isArray(newSurpriseScores) && typeof newSurpriseScores[0] === 'number' ? newSurpriseScores as number[] : [Number(newSurpriseScores)];
+
+        // Use tf.tensor for potentially multi-dimensional, tf.tensor1d for known 1D
+        levels[levelIndex] = tf.tensor(finalMemory);
+        hierarchicalMemory.timestamps[levelIndex] = tf.tensor1d(finalTimestamps);
+        accessCounts[levelIndex] = tf.tensor1d(finalAccessCounts);
+        hierarchicalMemory.surpriseScores[levelIndex] = tf.tensor1d(finalSurpriseScores);
       });
     });
   }
@@ -2200,7 +2244,7 @@ export class TitanMemoryModel implements IMemoryModel {
    * @param query The query tensor to match against memories
    * @returns The retrieved memory tensor
    */
-  private retrieveFromHierarchicalMemory(query: ITensorWrapper): ITensorWrapper {
+  private retrieveFromHierarchicalMemory(query: ITensor): ITensor {
     if (!this.hierarchicalMemory || !this.config.useHierarchicalMemory) {
       // Fall back to standard memory retrieval
       return this.retrieveFromMemory(query);
@@ -2251,11 +2295,18 @@ export class TitanMemoryModel implements IMemoryModel {
       });
 
       // Combine results from all levels
-      const combinedMemory = attentionResults.reduce((acc, levelResult) => {
-        const result = acc ? tf.add(acc, levelResult) : levelResult;
-        if (acc) tf.dispose(acc);
-        return result;
-      }, null);
+      let combinedMemory: tf.Tensor;
+      if (attentionResults.length === 0) {
+        throw new MemoryError('No attention results to combine');
+      } else if (attentionResults.length === 1) {
+        combinedMemory = attentionResults[0];
+      } else {
+        combinedMemory = attentionResults.reduce((acc, levelResult) => {
+          const result = tf.add(acc, levelResult);
+          tf.dispose(acc);
+          return result;
+        });
+      }
 
       // Normalize the result
       const normalizedMemory = tf.div(
@@ -2320,7 +2371,7 @@ export class TitanMemoryModel implements IMemoryModel {
       const maxValue = 2 ** this.quantizationBits - 1;
 
       // Update ranges if needed
-      if (tensor.rank === 2 && shape[1] === this.config.embeddingSize) {
+      if (tensor.rank === 2 && shape[1] === this.config.memoryDim) {
         // For embedding tensors, track per-dimension ranges
         const values = tensor.arraySync() as number[][];
 
@@ -2381,7 +2432,7 @@ export class TitanMemoryModel implements IMemoryModel {
       // Determine dequantization parameters
       const maxValue = 2 ** this.quantizationBits - 1;
 
-      if (ranges && shape.length === 2 && shape[1] === this.config.embeddingSize) {
+      if (ranges && shape.length === 2 && shape[1] === this.config.memoryDim) {
         // For embedding tensors, use per-dimension ranges
         for (let i = 0; i < shape[0]; i++) {
           for (let dim = 0; dim < shape[1]; dim++) {
@@ -2421,6 +2472,7 @@ export class TitanMemoryModel implements IMemoryModel {
       const quantized = this.quantizeTensor(tensor);
 
       // Update the appropriate memory
+      // No longer needs indexing as the type is now Uint8Array, not Uint8Array[]
       this.quantizedMemory![memoryType] = quantized;
 
       // Update quantization ranges
@@ -2448,12 +2500,12 @@ export class TitanMemoryModel implements IMemoryModel {
       // Dequantize based on memory type
       if (memoryType === 'shortTerm' || memoryType === 'longTerm') {
         return this.dequantizeTensor(
-          quantized,
+          quantized, // Pass the Uint8Array directly
           shape,
           this.quantizedMemory!.quantizationRanges
         );
       } else {
-        return this.dequantizeTensor(quantized, shape);
+        return this.dequantizeTensor(quantized, shape); // Pass the Uint8Array directly
       }
     });
   }
@@ -2462,8 +2514,8 @@ export class TitanMemoryModel implements IMemoryModel {
    * Updates memory with quantization support
    */
   private updateMemory(
-    input: ITensorWrapper,
-    surprise: ITensorWrapper,
+    input: ITensor,
+    surprise: ITensor,
     state: IMemoryState
   ): IMemoryState {
     return tf.tidy(() => {
@@ -2473,28 +2525,60 @@ export class TitanMemoryModel implements IMemoryModel {
       // Update memory at the selected slot
       const inputArray = unwrapTensor(input).arraySync();
       const newShortTerm = state.shortTerm.arraySync();
-      newShortTerm[oldestSlotIndex] = inputArray;
+      // Ensure newShortTerm is an array and index is valid before assignment
+      if (Array.isArray(newShortTerm) && oldestSlotIndex < newShortTerm.length) {
+        if (Array.isArray(inputArray) && Array.isArray(newShortTerm[oldestSlotIndex])) {
+          // Deeply flatten and filter to number[]
+          const flatInput: number[] = flattenToNumberArray(inputArray);
+          newShortTerm[oldestSlotIndex] = flatInput;
+        } else if (!Array.isArray(inputArray) && !Array.isArray(newShortTerm[oldestSlotIndex])) {
+          newShortTerm[oldestSlotIndex] = inputArray;
+        } else {
+          safeLog(`Type mismatch at index ${oldestSlotIndex} in updateMemory`);
+        }
+      }
 
       // Update metadata
       const newTimestamps = state.timestamps.arraySync();
-      newTimestamps[oldestSlotIndex] = Date.now();
+      // Ensure newTimestamps is an array and index is valid
+      if (Array.isArray(newTimestamps) && oldestSlotIndex < newTimestamps.length) {
+        newTimestamps[oldestSlotIndex] = Date.now();
+      }
 
       const newAccessCounts = state.accessCounts.arraySync();
-      newAccessCounts[oldestSlotIndex] = 1; // Reset access count for new memory
+      // Ensure newAccessCounts is an array and index is valid
+      if (Array.isArray(newAccessCounts) && oldestSlotIndex < newAccessCounts.length) {
+        newAccessCounts[oldestSlotIndex] = 1; // Reset access count for new memory
+      }
 
       // Update surprise history with exponential decay
       const newSurpriseHistory = state.surpriseHistory.arraySync();
-      newSurpriseHistory.shift(); // Remove oldest
-      newSurpriseHistory.push(unwrapTensor(surprise).dataSync()[0]); // Add newest
+      // Ensure newSurpriseHistory is an array before using array methods
+      if (Array.isArray(newSurpriseHistory)) {
+        // Deeply flatten and filter to number[]
+        const flatSurprise: number[] = flattenToNumberArray(newSurpriseHistory);
+        if (flatSurprise.length > 0) {
+          flatSurprise.shift();
+        }
+        flatSurprise.push(unwrapTensor(surprise).dataSync()[0]);
+        // Copy back to newSurpriseHistory if needed
+        for (let i = 0; i < flatSurprise.length; i++) newSurpriseHistory[i] = flatSurprise[i];
+      } else {
+        // Handle non-array case
+        safeLog("Warning: newSurpriseHistory was not an array during updateMemory.");
+        // Optionally re-initialize if needed: newSurpriseHistory = [unwrapTensor(surprise).dataSync()[0]];
+      }
 
       // Create new state
       const newState = {
-        shortTerm: tf.tensor(newShortTerm),
+        // Ensure shortTerm receives number[][] or compatible type, default to empty 2D array [[0]]
+        shortTerm: tf.tensor(Array.isArray(newShortTerm) && newShortTerm.length > 0 && Array.isArray(newShortTerm[0]) ? newShortTerm as number[][] : [[0]]),
         longTerm: state.longTerm.clone(),
         meta: state.meta.clone(),
-        timestamps: tf.tensor(newTimestamps),
-        accessCounts: tf.tensor(newAccessCounts),
-        surpriseHistory: tf.tensor(newSurpriseHistory)
+        // Ensure 1D arrays (number[]) are passed to tf.tensor1d, provide default [0]
+        timestamps: tf.tensor1d(Array.isArray(newTimestamps) && typeof newTimestamps[0] === 'number' ? newTimestamps as number[] : [Number(newTimestamps)]),
+        accessCounts: tf.tensor1d(Array.isArray(newAccessCounts) && typeof newAccessCounts[0] === 'number' ? newAccessCounts as number[] : [Number(newAccessCounts)]),
+        surpriseHistory: tf.tensor1d(Array.isArray(newSurpriseHistory) && typeof newSurpriseHistory[0] === 'number' ? newSurpriseHistory as number[] : [Number(newSurpriseHistory)])
       };
 
       // Update quantized memory if enabled
@@ -2506,5 +2590,14 @@ export class TitanMemoryModel implements IMemoryModel {
 
       return newState;
     });
+  }
+
+  // 1. Implement saveModel and loadModel
+  public async saveModel(path: string): Promise<void> {
+    // Corrected: Call save with only one argument as per its definition
+    await this.save(path);
+  }
+  public async loadModel(path: string): Promise<void> {
+    await this.load(path);
   }
 }

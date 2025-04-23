@@ -1,4 +1,70 @@
 # Titan Memory MCP Server
+
+## System Prompt for LLMs (Cursor/Claude MCP)
+
+```markdown
+You are connected to the @henryhawke/mcp-titan MCP server. Use the tools exactly as documented in docs/llm-system-prompt.md. No human intervention is required except for adding the mcp-titan llm-system-prompt rule to the client.
+
+- Always use the MCP tools for all memory, training, and state operations.
+- Always initialize the model with `init_model` before using any other tool.
+- Use `help` to discover available tools and their parameter schemas.
+- Use `save_checkpoint` and `load_checkpoint` to persist and restore memory state.
+- Use `reset_gradients` if you encounter training instability or errors.
+- Use `prune_memory` when memory capacity drops below 30%.
+- Always check tool responses for errors (`isError: true` or `type: "error"`) and handle them as documented.
+- Follow all best practices and error handling as described in docs/llm-system-prompt.md.
+- Do not use any implementation details or code not exposed by the server.
+- Reference docs/llm-system-prompt.md for the latest schemas and usage examples.
+
+This prompt is copy-pastable and should be used as the system prompt for any LLM (Cursor, Claude, or other MCP-compliant clients) to ensure correct and robust operation with MCP Titan.
+```
+
+## Installation & Usage as MCP Server for Cursor or Claude
+
+### Prerequisites
+
+- Node.js (v18 or later recommended)
+- npm (comes with Node.js)
+- (Optional) Docker, if you want to run in a container
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/henryhawke/mcp-titan.git
+cd titan-memory
+```
+
+### 2. Install Dependencies
+
+```bash
+npm install
+```
+
+### 3. Build the Project
+
+```bash
+npm run build
+```
+
+### 4. Start the MCP Server
+
+```bash
+npm start
+```
+
+The server will start and listen for MCP tool requests. By default, it runs on port 8080 (or as configured in your environment).
+
+### 5. Integrate with Cursor or Claude
+
+- **Cursor**: Ensure MCP is enabled in Cursor settings. Cursor will auto-detect and connect to the running MCP server.
+- **Claude Desktop**: Set the MCP server endpoint in Claude's settings to `http://localhost:8080` (or your configured host/port).
+
+### 6. Test the MCP Server
+
+You can use the provided tool APIs (see below) or connect via Cursor/Claude to verify memory operations.
+
+---
+
 ## I'm aware its broken right now, I'll fix it! Ideally this just runs in yolo mode in cursor (or claude desktop) without human intervention and creates a "brain" available independent of LLM version.
 
 A neural memory system for LLMs that can learn and predict sequences while maintaining state through a memory vector. This MCP (Model Context Protocol) server provides tools for Claude 3.7 Sonnet and other LLMs to maintain memory state across interactions.
@@ -11,23 +77,6 @@ A neural memory system for LLMs that can learn and predict sequences while maint
 - **MCP Integration**: Fully compatible with Cursor and other MCP clients
 - **Text Encoding**: Convert text inputs to tensor representations
 - **Memory Persistence**: Save and load memory states between sessions
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/titan-memory.git
-cd titan-memory
-
-# Install dependencies
-npm install
-
-# Build the project
-npm run build
-
-# Start the server
-npm start
-```
 
 ## Available Tools
 

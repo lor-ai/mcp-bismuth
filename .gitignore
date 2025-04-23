@@ -19,3 +19,6 @@ package-lock.json
 test-weights.json
 memory.json
 package-lock.json
+dist/
+.DS_Store
+

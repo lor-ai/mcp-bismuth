@@ -33,13 +33,13 @@ export class WebSocketTransport implements Transport {
           const request = JSON.parse(data.toString()) as CallToolRequest;
           const result = await this.requestHandler(request);
           this.ws.send(JSON.stringify(result));
-        } catch (error) {
+        } catch (caughtError) {
           this.ws.send(JSON.stringify({
             success: false,
-            error: error instanceof Error ? error.message : 'Invalid request',
+            error: caughtError instanceof Error ? caughtError.message : 'Invalid request',
             content: [{
               type: "error",
-              text: error instanceof Error ? error.message : 'Invalid request'
+              text: caughtError instanceof Error ? caughtError.message : 'Invalid request'
             }]
           }));
         }
@@ -79,13 +79,13 @@ export class StdioServerTransport implements Transport {
         const request = JSON.parse(line) as CallToolRequest;
         const result = await this.requestHandler(request);
         console.log(JSON.stringify(result));
-      } catch (error) {
+      } catch (caughtError) {
         console.log(JSON.stringify({
           success: false,
-          error: error instanceof Error ? error.message : 'Invalid request',
+          error: caughtError instanceof Error ? caughtError.message : 'Invalid request',
           content: [{
             type: "error",
-            text: error instanceof Error ? error.message : 'Invalid request'
+            text: caughtError instanceof Error ? caughtError.message : 'Invalid request'
           }]
         }));
       }
@@ -145,7 +145,7 @@ export class McpServerImpl implements McpServer {
       try {
         const validated = zodSchema.parse(params);
         const result = await handler(validated);
-        
+
         // Ensure result has the correct format
         if (!result.content) {
           return {
@@ -155,16 +155,16 @@ export class McpServerImpl implements McpServer {
             }]
           };
         }
-        
+
         return result;
-      } catch (error) {
-        console.error(`Error executing tool ${name}:`, error);
+      } catch (caughtError) {
+        console.error(`Error executing tool ${name}:`, caughtError);
         return {
           success: false,
-          error: error instanceof Error ? error.message : 'Tool execution failed',
+          error: caughtError instanceof Error ? caughtError.message : 'Tool execution failed',
           content: [{
             type: "error",
-            text: error instanceof Error ? error.message : 'Tool execution failed'
+            text: caughtError instanceof Error ? caughtError.message : 'Tool execution failed'
           }],
           isError: true
         };
@@ -178,35 +178,38 @@ export class McpServerImpl implements McpServer {
   private extractSchemaProperties(schema: z.ZodObject<any>): Record<string, any> {
     const shape = schema._def.shape();
     const properties: Record<string, any> = {};
-    
+
     for (const [key, def] of Object.entries(shape)) {
       let type = 'string';
       let description = '';
-      
-      if (def instanceof z.ZodString) {
+
+      // Cast def to access internal properties safely
+      const zodDef = def as z.ZodTypeAny;
+
+      if (zodDef instanceof z.ZodString) {
         type = 'string';
-      } else if (def instanceof z.ZodNumber) {
+      } else if (zodDef instanceof z.ZodNumber) {
         type = 'number';
-      } else if (def instanceof z.ZodBoolean) {
+      } else if (zodDef instanceof z.ZodBoolean) {
         type = 'boolean';
-      } else if (def instanceof z.ZodArray) {
+      } else if (zodDef instanceof z.ZodArray) {
         type = 'array';
-      } else if (def instanceof z.ZodObject) {
+      } else if (zodDef instanceof z.ZodObject) {
         type = 'object';
       }
-      
+
       // Extract description if available
-      if (def._def.description) {
-        description = def._def.description;
+      if (zodDef._def && zodDef._def.description) {
+        description = zodDef._def.description;
       }
-      
+
       properties[key] = {
         type,
         description,
-        required: !def.isOptional()
+        required: !zodDef.isOptional()
       };
     }
-    
+
     return properties;
   }
 
@@ -228,17 +231,17 @@ export class McpServerImpl implements McpServer {
           isError: true
         };
       }
-      
+
       try {
         return await handler(request.parameters);
-      } catch (error) {
-        console.error(`Error handling request for tool ${request.name}:`, error);
+      } catch (caughtError) {
+        console.error(`Error handling request for tool ${request.name}:`, caughtError);
         return {
           success: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
+          error: caughtError instanceof Error ? caughtError.message : 'Unknown error',
           content: [{
             type: "error" as const,
-            text: error instanceof Error ? error.message : 'Unknown error'
+            text: caughtError instanceof Error ? caughtError.message : 'Unknown error'
           }],
           isError: true
         };

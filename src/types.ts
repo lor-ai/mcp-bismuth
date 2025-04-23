@@ -107,6 +107,7 @@ export interface IAttentionBlock {
 export interface ISurpriseMetrics {
   immediate: ITensor;
   accumulated: ITensor;
+  totalSurprise: ITensor;
 }
 
 /**
@@ -355,4 +356,48 @@ export interface IMemoryModel {
   storeMemoryWithType?(text: string, isEpisodic?: boolean): Promise<void>;
   recallMemoryByType?(query: string, type?: 'episodic' | 'semantic' | 'both', topK?: number): Promise<tf.Tensor2D[]>;
   recallAndDistill?(query: string, topK?: number): Promise<tf.Tensor2D>;
+}
+
+// --- Internal/Specific State Types ---
+
+/**
+ * Internal representation for hierarchical memory state, using arrays of tensors.
+ */
+export interface IHierarchicalMemoryStateInternal {
+  levels: tf.Tensor[];
+  timestamps: tf.Tensor[];
+  accessCounts: tf.Tensor[];
+  surpriseScores: tf.Tensor[];
+}
+
+/**
+ * Internal representation for quantized memory state, using Uint8Arrays.
+ */
+export interface IQuantizedMemoryStateInternal {
+  shortTerm: Uint8Array;
+  longTerm: Uint8Array;
+  meta: Uint8Array;
+  quantizationRanges: { min: number; max: number }[];
+}
+
+// --- Utility Types ---
+
+/**
+ * Maps string representations of data types to TensorFlow.js DataType enum strings.
+ */
+export type DataTypeMap = {
+  float32: 'float32';
+  int32: 'int32';
+  bool: 'bool';
+  string: 'string';
+  complex64: 'complex64';
+  uint8?: 'uint8'; // Optional, used for boolean storage sometimes
+};
+
+/**
+ * Represents capabilities of the MCP server.
+ */
+export interface McpServer {
+  tool(name: string, schema: z.ZodRawShape | string, handler: Function): void;
+  connect(transport: Transport): Promise<void>;
 }

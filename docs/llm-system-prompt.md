@@ -1,3 +1,278 @@
+# Titan Memory MCP Server System Prompt
+
+**This file documents the tool usage for the @henryhawke/mcp-titan MCP server. It is fully compatible with Cursor and Claude MCP clients. No human intervention is required for operation except for adding the mcp-titan llm-system-prompt to the cursor rules. All tool names, parameters, and return types are accurate as of the latest implementation.**
+
+## 🛠️ MCP Tool Usage Reference
+
+### Available Tools
+
+#### 1. `help`
+
+Get help about available tools.
+
+```typescript
+interface HelpParams {
+  tool?: string;
+  category?: string;
+  showExamples?: boolean;
+  verbose?: boolean;
+}
+const result = await callTool("help", {
+  tool: "forward_pass",
+  showExamples: true,
+});
+```
+
+#### 2. `init_model`
+
+Initialize the Titan Memory model with custom configuration.
+
+```typescript
+interface InitModelParams {
+  inputDim?: number; // Default: 768
+  hiddenDim?: number; // Default: 512
+  memoryDim?: number; // Default: 1024
+  transformerLayers?: number; // Default: 6
+  numHeads?: number; // Default: 8
+  ffDimension?: number; // Default: 2048
+  dropoutRate?: number; // Default: 0.1
+  maxSequenceLength?: number; // Default: 512
+  memorySlots?: number; // Default: 5000
+  similarityThreshold?: number; // Default: 0.65
+  surpriseDecay?: number; // Default: 0.9
+  pruningInterval?: number; // Default: 1000
+  gradientClip?: number; // Default: 1.0
+}
+const result = await callTool("init_model", {
+  inputDim: 768,
+  memorySlots: 10000,
+  transformerLayers: 8,
+});
+```
+
+#### 3. `forward_pass`
+
+Perform a forward pass through the model to get predictions.
+
+```typescript
+interface ForwardPassParams {
+  x: number[] | string; // Input vector or text
+  memoryState?: {
+    shortTerm?: number[];
+    longTerm?: number[];
+    meta?: number[];
+    timestamps?: number[];
+    accessCounts?: number[];
+    surpriseHistory?: number[];
+  };
+}
+const { predicted, memoryUpdate } = await callTool("forward_pass", {
+  x: "const x = 5;",
+});
+```
+
+#### 4. `train_step`
+
+Execute a training step to update the model.
+
+```typescript
+interface TrainStepParams {
+  x_t: number[] | string; // Current input
+  x_next: number[] | string; // Next input
+}
+const result = await callTool("train_step", {
+  x_t: "function hello() {",
+  x_next: "  console.log('world');",
+});
+```
+
+#### 5. `get_memory_state`
+
+Get the current memory state and statistics.
+
+```typescript
+interface GetMemoryStateParams {
+  type?: string; // Optional memory type filter
+}
+const state = await callTool("get_memory_state", {});
+// Returns:
+// {
+//   stats: { shortTermMean, shortTermStd, longTermMean, longTermStd, surpriseScore, patternDiversity, capacity },
+//   capacity: number,
+//   status: "active" | "pruning",
+//   timestamps: number[],
+//   accessCounts: number[]
+// }
+```
+
+#### 6. `manifold_step`
+
+Update memory along a manifold direction.
+
+```typescript
+interface ManifoldStepParams {
+  base: number[];
+  velocity: number[];
+}
+const result = await callTool("manifold_step", {
+  base: [
+    /*...*/
+  ],
+  velocity: [
+    /*...*/
+  ],
+});
+```
+
+#### 7. `prune_memory`
+
+Remove less relevant memories to free up space.
+
+```typescript
+interface PruneMemoryParams {
+  threshold: number; // Pruning threshold (0-1)
+}
+const result = await callTool("prune_memory", { threshold: 0.5 });
+```
+
+#### 8. `save_checkpoint`
+
+Save memory state to a file.
+
+```typescript
+interface SaveCheckpointParams {
+  path: string; // Checkpoint file path
+}
+await callTool("save_checkpoint", { path: "/backups/memory-snapshot.json" });
+```
+
+#### 9. `load_checkpoint`
+
+Load memory state from a file.
+
+```typescript
+interface LoadCheckpointParams {
+  path: string; // Checkpoint file path
+}
+await callTool("load_checkpoint", { path: "/backups/last-stable.json" });
+```
+
+#### 10. `reset_gradients`
+
+Reset accumulated gradients to recover from training issues.
+
+```typescript
+await callTool("reset_gradients", {});
+```
+
+---
+
+## Usage Examples
+
+### Initialize the model
+
+```typescript
+await callTool("init_model", {
+  inputDim: 768,
+  memorySlots: 10000,
+  transformerLayers: 8,
+});
+```
+
+### Forward pass
+
+```typescript
+const { predicted, memoryUpdate } = await callTool("forward_pass", {
+  x: "const x = 5;",
+});
+```
+
+### Training step
+
+```typescript
+await callTool("train_step", {
+  x_t: "function hello() {",
+  x_next: "  console.log('world');",
+});
+```
+
+### Get memory state
+
+```typescript
+const state = await callTool("get_memory_state", {});
+```
+
+### Prune memory
+
+```typescript
+await callTool("prune_memory", { threshold: 0.5 });
+```
+
+### Save and load checkpoints
+
+```typescript
+await callTool("save_checkpoint", { path: "/backups/memory-snapshot.json" });
+await callTool("load_checkpoint", { path: "/backups/last-stable.json" });
+```
+
+### Reset gradients
+
+```typescript
+await callTool("reset_gradients", {});
+```
+
+---
+
+## Tool Response Format
+
+All tools return a response in the following format:
+
+```typescript
+interface ToolResponse {
+  content: Array<{
+    type: "text" | "error" | "data";
+    text: string;
+    data?: any;
+  }>;
+  isError?: boolean;
+}
+```
+
+Always check the `type` field in the response. If `type` is "error" or `isError` is true, handle the error accordingly.
+
+---
+
+## Error Handling
+
+If a tool call fails, the response will include `isError: true` and a `content` array with `type: "error"`.
+
+```typescript
+const response = await callTool("forward_pass", { x: "bad input" });
+if (response.isError || response.content[0].type === "error") {
+  // Handle error
+  console.error(response.content[0].text);
+}
+```
+
+---
+
+## Best Practices
+
+- Always initialize the model with `init_model` before using other tools.
+- Use the `help` tool to discover available tools and their parameters.
+- Use `save_checkpoint` and `load_checkpoint` to persist and restore memory state.
+- Use `reset_gradients` if you encounter training instability or errors.
+- Use `prune_memory` when memory capacity drops below 30%.
+- Always check tool responses for errors and handle them gracefully.
+
+---
+
+## For MCP Clients and LLMs
+
+- All tools are model-controlled and require no human intervention except for initial rule setup.
+- All parameter schemas and return types are enforced by the server and are safe to use as documented.
+- This prompt is designed for seamless operation in Cursor, Claude, and any MCP-compliant client.
+
 ## 🛠️ Complete Tool Usage Reference
 
 ### Core Memory Tools

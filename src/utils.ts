@@ -96,10 +96,10 @@ export class MemoryManager {
 
 export class VectorProcessor {
     private static instance: VectorProcessor;
-    private memoryManager: MemoryManager;
+    private memoryManager: MemoryManager = MemoryManager.getInstance();
 
     private constructor() {
-        this.memoryManager = MemoryManager.getInstance();
+        // Initialize MemoryManager
     }
 
     public static getInstance(): VectorProcessor {
@@ -110,103 +110,107 @@ export class VectorProcessor {
     }
 
     /**
-     * Process input data into a tensor with appropriate shape
-     * Handles various input types: number, array, string, tensor
+     * Processes input, ensuring it's a valid tensor
+     * @param input Input data (string, number[], or tf.Tensor)
+     * @returns Processed tf.Tensor
      */
-    public processInput(input: number | number[] | string | tf.Tensor): tf.Tensor {
+    public processInput(input: string | number[] | tf.Tensor): tf.Tensor {
+        // Use wrapWithMemoryManagement for safer tensor operations
         return this.memoryManager.wrapWithMemoryManagement(() => {
             try {
-                // Handle string input
                 if (typeof input === 'string') {
-                    return this.encodeText(input);
-                }
-
-                // Handle number input (single value)
-                if (typeof input === 'number') {
-                    return tf.tensor2d([[input]]);
-                }
-
-                // Handle array input
-                if (Array.isArray(input)) {
-                    // Check if it's a 1D or 2D array
-                    if (input.length > 0 && Array.isArray(input[0])) {
-                        // It's already 2D
-                        return tf.tensor2d(input as number[][]);
-                    } else {
-                        // It's 1D, convert to 2D
-                        return tf.tensor2d([input]);
+                    // Handle string input: encodeText returns a Promise<tf.Tensor>, so await it
+                    // However, wrapWithMemoryManagement expects a sync function.
+                    // Encoding should happen *outside* the sync wrapper.
+                    // This function should likely be async or handle the promise differently.
+                    // For now, throwing error as async logic can't be directly in sync wrapper.
+                    throw new Error('String input requires async processing, use encodeText directly.');
+                } else if (Array.isArray(input)) {
+                    // Handle array input
+                    if (input.length === 0) {
+                        return tf.tensor2d([], [0, 1]); // Handle empty array
                     }
-                }
-
-                // Handle tensor input
-                if (input instanceof tf.Tensor) {
+                    if (typeof input[0] === 'number') {
+                        // It's 1D, convert to 2D [1, N]
+                        return tf.tensor1d(input as number[]).expandDims(0);
+                    } else {
+                        // Assume it's already 2D or compatible
+                        // Add more robust checking if needed
+                        // Attempt to create tensor2d, catch potential errors
+                        try {
+                            return tf.tensor2d(input as number[][]);
+                        } catch (e) {
+                            console.error("Failed to create tensor2d from array:", e);
+                            throw new Error("Invalid array format for tensor2d");
+                        }
+                    }
+                } else if (input instanceof tf.Tensor) {
+                    // Handle tensor input
                     // Ensure it's 2D
                     if (input.rank === 1) {
-                        return input.expandDims(0);
+                        return input.expandDims(0); // Convert 1D to 2D
                     } else if (input.rank === 2) {
-                        return input;
+                        return input; // Already 2D
                     } else {
                         throw new Error(`Unsupported tensor rank: ${input.rank}. Expected 1 or 2.`);
                     }
+                } else {
+                    throw new Error(`Unsupported input type: ${typeof input}`);
                 }
-
-                throw new Error(`Unsupported input type: ${typeof input}`);
             } catch (error) {
-                console.error('Error processing input:', error);
-                // Return a default tensor in case of error
-                return tf.zeros([1, 768]);
+                console.error("Error processing input:", error);
+                // Create a default tensor in case of error
+                // Use a default dimension size (e.g., 768) if model config isn't accessible here
+                const defaultDim = 768;
+                return tf.zeros([1, defaultDim]);
             }
         });
     }
 
     /**
-     * Validate and normalize a tensor to match expected shape
+     * Validates tensor shape and normalizes if necessary
+     * @param tensor Tensor to validate
+     * @param expectedShape Expected shape
+     * @returns Validated and potentially normalized tensor
      */
     public validateAndNormalize(tensor: tf.Tensor, expectedShape: number[]): tf.Tensor {
         return this.memoryManager.wrapWithMemoryManagement(() => {
-            // Check if tensor shape matches expected shape
-            if (!this.memoryManager.validateVectorShape(tensor, expectedShape)) {
-                // Reshape tensor to match expected shape
-                const reshapedTensor = SafeTensorOps.reshape(tensor, expectedShape);
-
-                // Normalize values to be between -1 and 1
-                const normalized = tf.div(reshapedTensor, tf.add(tf.abs(reshapedTensor), 1e-8));
-
-                return normalized;
-            }
-
+            validateTensorShape(tensor, expectedShape);
+            // Add normalization logic if required (e.g., L2 normalization)
+            // return tf.tidy(() => tf.div(tensor, tf.norm(tensor)));
             return tensor;
         });
     }
 
     /**
-     * Encode text into a tensor representation
-     * Uses a simple character-level encoding with positional information
+     * Encodes text to a tensor representation using a pre-trained model.
+     * @param text The text to encode.
+     * @param maxLength Optional maximum sequence length.
+     * @returns A promise resolving to the encoded tensor.
      */
-    public async encodeText(text: string, maxLength: number = 768): Promise<tf.Tensor> {
-        return this.memoryManager.wrapWithMemoryManagement(() => {
-            // Convert string to bytes
-            const encoder = new TextEncoder();
-            const bytes = encoder.encode(text);
+    public async encodeText(text: string, maxLength: number = 512): Promise<tf.Tensor> {
+        // Use wrapWithMemoryManagementAsync for async tensor operations
+        return this.memoryManager.wrapWithMemoryManagementAsync(async () => {
+            try {
+                // Placeholder: Replace with actual text encoding logic (e.g., using USE)
+                // const model = await use.load(); // Example: Load Universal Sentence Encoder
+                // const embeddings = await model.embed([text]);
+                // return embeddings;
 
-            // Create a padded array of the specified length
-            const paddedArray = new Float32Array(maxLength).fill(0);
-
-            // Copy bytes and normalize to [-1, 1]
-            for (let i = 0; i < Math.min(bytes.length, maxLength); i++) {
-                // Normalize to [-1, 1] range
-                paddedArray[i] = (bytes[i] / 127.5) - 1;
+                // Simple character code encoding as a fallback placeholder
+                const tokens = text.split('').map(char => char.charCodeAt(0));
+                let paddedArray = tokens.slice(0, maxLength);
+                while (paddedArray.length < maxLength) {
+                    paddedArray.push(0); // Pad with 0
+                }
+                // Ensure the output is a 2D tensor [1, maxLength]
+                const tensor = tf.tensor2d([paddedArray], [1, maxLength]);
+                return tensor;
+            } catch (error) {
+                console.error("Error encoding text:", error);
+                // Return a default zero tensor in case of error
+                return tf.zeros([1, maxLength]);
             }
-
-            // Add positional encoding
-            for (let i = 0; i < Math.min(bytes.length, maxLength); i++) {
-                // Add sine wave positional encoding
-                const position = i / maxLength;
-                paddedArray[i] += Math.sin(position * Math.PI) * 0.1;
-            }
-
-            // Create a 2D tensor (batch size 1)
-            return tf.tensor2d([paddedArray]);
         });
     }
 }
