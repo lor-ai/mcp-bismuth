@@ -10,6 +10,8 @@ import * as fs from 'fs/promises';
 import { z } from 'zod';
 import { VectorProcessor, SafeTensorOps } from './utils.js';
 import { AdvancedTokenizer, type TokenizerConfig } from './tokenizer/index.js';
+import { MemoryPruner, type PruningConfig, type PruningResult, createDefaultPruningConfig } from './pruning.js';
+import { TfIdfVectorizer } from './tfidf.js';
 
 // Add telemetry implementation
 class ModelTelemetry {
@@ -327,6 +329,13 @@ export class TitanMemoryModel implements IMemoryModel {
   private hnswIndex: any = null;
 
   private vectorProcessor: VectorProcessor = VectorProcessor.getInstance();
+  
+  // Memory pruning system
+  private memoryPruner: MemoryPruner;
+  
+  // TF-IDF fallback for untrained encoder
+  private tfidfVectorizer: TfIdfVectorizer | null = null;
+  private fallbackDocuments: string[] = [];
 
   // Add error handling wrapper
   private withErrorHandling<T>(operation: string, fn: () => T): T {
@@ -364,6 +373,18 @@ export class TitanMemoryModel implements IMemoryModel {
   constructor(config?: Partial<TitanMemoryConfig>) {
     // Initialize with empty config first
     this.config = ModelConfigSchema.parse(config || {});
+    
+    // Initialize memory pruner with configuration
+    this.memoryPruner = new MemoryPruner({
+      keepPercentage: 0.7,
+      minMemoriesToKeep: 100,
+      maxCapacity: this.config.memorySlots,
+      entropyWeight: 1.0,
+      surpriseWeight: 1.2,
+      redundancyWeight: 0.8,
+      enableDistillation: true
+    });
+    
     // Initialize tokenizer based on configuration (async, will be handled during initialize())
     this.initializeTokenizer().catch(error => {
       console.warn('Failed to initialize tokenizer in constructor:', error);
@@ -548,6 +569,28 @@ export class TitanMemoryModel implements IMemoryModel {
           if (this.advancedTokenizer) {
             this.advancedTokenizer.setLegacyMode(true);
           }
+        }
+      }
+      
+      // TF-IDF fallback if encoder is untrained or vectorProcessor unavailable
+      if (this.tfidfVectorizer && this.fallbackDocuments.length > 0) {
+        try {
+          const tfidfVector = this.tfidfVectorizer.transform([text]);
+          const vectorArray = await tfidfVector.data();
+          
+          // Pad or truncate to match config.maxSequenceLength
+          const targetLength = this.config.maxSequenceLength;
+          const resultArray = new Float32Array(targetLength);
+          const copyLength = Math.min(vectorArray.length, targetLength);
+          
+          for (let i = 0; i < copyLength; i++) {
+            resultArray[i] = vectorArray[i];
+          }
+          
+          tfidfVector.dispose();
+          return tf.tensor1d(resultArray);
+        } catch (error) {
+          console.warn('TF-IDF fallback failed:', error);
         }
       }
       
@@ -1221,7 +1264,8 @@ export class TitanMemoryModel implements IMemoryModel {
 
   /**
    * Saves the model to disk with proper versioning and error handling
-   * @param path The path to save the model to
+   * @param path The path to save the model to (legacy format)
+   * @deprecated Use saveCheckpoint() with RobustPersistenceManager instead
    */
   public async save(path: string): Promise<void> {
     return this.withErrorHandling('save', async () => {
@@ -1303,8 +1347,27 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   /**
+   * Save a robust checkpoint using the new persistence manager
+   * @param persistenceManager The persistence manager instance
+   * @param tokenizer Optional tokenizer to include in checkpoint
+   * @param annIndex Optional ANN index to include in checkpoint
+   * @param metadata Optional additional metadata
+   */
+  public async saveCheckpoint(
+    persistenceManager: any, // Will be properly typed when persistence is imported
+    tokenizer?: any,
+    annIndex?: any,
+    metadata?: any
+  ): Promise<string> {
+    return this.withErrorHandling('saveCheckpoint', async () => {
+      return await persistenceManager.saveCheckpoint(this, tokenizer, annIndex, metadata);
+    });
+  }
+
+  /**
    * Loads the model from disk with proper error handling
-   * @param path The path to load the model from
+   * @param path The path to load the model from (legacy format)
+   * @deprecated Use loadCheckpoint() with RobustPersistenceManager instead
    */
   public async load(path: string): Promise<void> {
     return this.withErrorHandling('load', async () => {
@@ -1477,6 +1540,23 @@ export class TitanMemoryModel implements IMemoryModel {
         }
         throw new MemoryError(`Failed to load model: ${err.message}`); // Use casted error
       }
+    });
+  }
+
+  /**
+   * Load a robust checkpoint using the new persistence manager
+   * @param persistenceManager The persistence manager instance
+   * @param checkpointPath Path to the checkpoint
+   * @param options Optional loading options
+   */
+  public async loadCheckpoint(
+    persistenceManager: any, // Will be properly typed when persistence is imported
+    checkpointPath: string,
+    options: any = {}
+  ): Promise<{ model: TitanMemoryModel; tokenizer?: any; annIndex?: any }> {
+    return this.withErrorHandling('loadCheckpoint', async () => {
+      const { model, tokenizer, annIndex } = await persistenceManager.loadCheckpoint(checkpointPath, options);
+      return { model, tokenizer, annIndex };
     });
   }
 
@@ -2908,6 +2988,85 @@ export class TitanMemoryModel implements IMemoryModel {
 
       return newState;
     });
+  }
+
+  /**
+   * Prune memory using information-gain scoring
+   * @param threshold Optional threshold for keeping memories (0.0 to 1.0)
+   */
+  public async pruneMemoryByInformationGain(threshold?: number): Promise<PruningResult> {
+    return this.withErrorHandling('pruneMemoryByInformationGain', async () => {
+      // Update pruner configuration if threshold is provided
+      if (threshold !== undefined) {
+        this.memoryPruner.updateConfig({ keepPercentage: threshold });
+      }
+      
+      // Check if pruning is needed
+      if (!this.memoryPruner.shouldPrune(this.memoryState)) {
+        return {
+          originalCount: this.getMemorySize(),
+          finalCount: this.getMemorySize(),
+          distilledCount: 0,
+          averageScore: 0,
+          reductionRatio: 0,
+          newMemoryState: this.memoryState
+        };
+      }
+      
+      // Perform pruning
+      const result = await this.memoryPruner.pruneMemory(this.memoryState);
+      
+      // Validate the pruned state
+      if (!this.memoryPruner.validatePrunedState(result.newMemoryState)) {
+        throw new MemoryError('Pruned memory state failed validation');
+      }
+      
+      // Update the model's memory state
+      this.memoryState = result.newMemoryState;
+      
+      // Log pruning statistics
+      const stats = this.memoryPruner.getPruningStats();
+      console.log(`Memory pruned: ${result.originalCount} -> ${result.finalCount} slots (${(result.reductionRatio * 100).toFixed(1)}% reduction)`);
+      console.log(`Distilled ${result.distilledCount} memories into long-term storage`);
+      console.log(`Average score of kept memories: ${result.averageScore.toFixed(4)}`);
+      console.log(`Total pruning operations: ${stats.totalPrunings}`);
+      
+      return result;
+    });
+  }
+  
+  /**
+   * Get the current number of active memories
+   */
+  private getMemorySize(): number {
+    return tf.tidy(() => {
+      // Count non-zero entries in timestamps as active memories
+      const nonZeroMask = tf.greater(this.memoryState.timestamps, 0);
+      return tf.sum(tf.cast(nonZeroMask, 'int32')).dataSync()[0];
+    });
+  }
+  
+  /**
+   * Get memory pruning statistics
+   */
+  public getPruningStats(): {
+    totalPrunings: number;
+    averageReduction: number;
+    lastPruningTime: number;
+    timeSinceLastPruning: number;
+    shouldPrune: boolean;
+    currentMemorySize: number;
+    maxCapacity: number;
+  } {
+    const prunerStats = this.memoryPruner.getPruningStats();
+    const currentSize = this.getMemorySize();
+    
+    return {
+      ...prunerStats,
+      shouldPrune: this.memoryPruner.shouldPrune(this.memoryState),
+      currentMemorySize: currentSize,
+      maxCapacity: this.config.memorySlots
+    };
   }
 
   // 1. Implement saveModel and loadModel

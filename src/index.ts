@@ -17,6 +17,7 @@ export type { TokenizerConfig, TokenizationResult, BPEConfig, EmbeddingConfig, M
 export { LearnerService, type LearnerConfig } from './learner.js';
 import { LearnerService, type LearnerConfig } from './learner.js';
 import { VectorProcessor } from './utils.js';
+import { TfIdfVectorizer } from './tfidf.js';
 import * as path from 'path';
 import { promises as fs } from 'fs';
 import * as crypto from 'crypto';
@@ -168,6 +169,80 @@ export class TitanMemoryServer {
             text: helpText
           }]
         };
+      }
+    );
+
+// Bootstrap memory tool
+    this.server.tool(
+      'bootstrap_memory',
+      "Initialize memory and train tokenizer based on a given URL or text corpus",
+      {
+        source: z.union([z.string().url(), z.string()]).describe("URL or text corpus")
+      },
+      async (params) => {
+        try {
+          // Example logic to fetch data and initialize memory
+          const documents = await this.fetchDocuments(params.source);
+          
+          // Initialize TF-IDF Vectorizer
+          const tfidfVectorizer = new TfIdfVectorizer();
+          tfidfVectorizer.fit(documents);
+          
+          // Store in model instance variables if available
+          if (this.model && typeof this.model === 'object') {
+            (this.model as any).tfidfVectorizer = tfidfVectorizer;
+            (this.model as any).fallbackDocuments = documents;
+          }
+          
+          // Generate seed summaries for memory initialization
+          const seedSummaries: string[] = [];
+          for (const doc of documents.slice(0, 50)) { // Limit to first 50 documents
+            const summary = await this.summarizeText(doc);
+            seedSummaries.push(summary);
+          }
+          
+          // Populate memory with summarized documents
+          await this.ensureInitialized();
+          let memoriesAdded = 0;
+          
+          for (const summary of seedSummaries) {
+            try {
+              // Store each summary in the model's memory
+              await this.model.storeMemory(summary);
+              memoriesAdded++;
+            } catch (error) {
+              console.warn('Failed to store summary in memory:', error);
+            }
+          }
+          
+          // Train the tokenizer with documents if advanced tokenizer is available
+          if (this.model && (this.model as any).advancedTokenizer) {
+            try {
+              const tokenizer = (this.model as any).advancedTokenizer;
+              // Bootstrap the tokenizer with some of the documents
+              for (const doc of documents.slice(0, 20)) {
+                await tokenizer.encode(doc);
+              }
+            } catch (error) {
+              console.warn('Failed to train tokenizer:', error);
+            }
+          }
+
+          return {
+            content: [{
+              type: "text",
+              text: `Memory bootstrap completed successfully. Added ${memoriesAdded} seed memories from ${documents.length} documents. TF-IDF vectorizer initialized for sparse fallback.`
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to bootstrap memory: ${message}`
+            }]
+          };
+        }
       }
     );
 
@@ -396,6 +471,67 @@ export class TitanMemoryServer {
             content: [{
               type: "text",
               text: `Failed to reset gradients: ${message}`
+            }]
+          };
+        }
+      }
+    );
+
+    // Prune memory tool with information-gain scoring
+    this.server.tool(
+      'prune_memory',
+      "Prune memory using information-gain scoring to remove less relevant memories",
+      {
+        threshold: z.number().min(0).max(1).optional().describe("Percentage of memories to keep (0.0 to 1.0)"),
+        force: z.boolean().optional().default(false).describe("Force pruning even if not needed")
+      },
+      async (params) => {
+        await this.ensureInitialized();
+
+        try {
+          // Check if the model supports the pruning method
+          if (!this.model.pruneMemoryByInformationGain) {
+            return {
+              content: [{
+                type: "text",
+                text: "Memory pruning is not supported by this model version"
+              }]
+            };
+          }
+
+          // Get current memory stats before pruning
+          const beforeStats = this.model.getPruningStats();
+          
+          // Perform pruning
+          const result = await this.model.pruneMemoryByInformationGain(params.threshold);
+          
+          // Get stats after pruning
+          const afterStats = this.model.getPruningStats();
+          
+          const message = [
+            `Memory pruning completed successfully:`,
+            `• Original count: ${result.originalCount} memories`,
+            `• Final count: ${result.finalCount} memories`,
+            `• Distilled count: ${result.distilledCount} memories moved to long-term storage`,
+            `• Reduction ratio: ${(result.reductionRatio * 100).toFixed(1)}%`,
+            `• Average score of kept memories: ${result.averageScore.toFixed(4)}`,
+            `• Current memory usage: ${afterStats.currentMemorySize}/${afterStats.maxCapacity} slots`,
+            `• Total pruning operations: ${afterStats.totalPrunings}`,
+            `• Time since last pruning: ${(afterStats.timeSinceLastPruning / 1000).toFixed(1)}s`
+          ].join('\n');
+
+          return {
+            content: [{
+              type: "text",
+              text: message
+            }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return {
+            content: [{
+              type: "text",
+              text: `Failed to prune memory: ${message}`
             }]
           };
         }
@@ -939,6 +1075,76 @@ export class TitanMemoryServer {
     }
 
     return recommendations;
+  }
+
+  /**
+   * Fetches documents from a URL or processes text corpus for memory bootstrap
+   */
+  private async fetchDocuments(source: string): Promise<string[]> {
+    try {
+      // Check if source is a URL
+      if (source.startsWith('http://') || source.startsWith('https://')) {
+        // Fetch content from URL
+        const response = await fetch(source);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
+        }
+        
+        const content = await response.text();
+        
+        // Simple text processing: split into sentences and paragraphs
+        const sentences = content
+          .replace(/\n{2,}/g, '\n') // Normalize line breaks
+          .split(/[.!?]+/) // Split on sentence endings
+          .map(s => s.trim())
+          .filter(s => s.length > 10) // Filter out very short sentences
+          .slice(0, 1000); // Limit to first 1000 sentences
+        
+        return sentences;
+      } else {
+        // Treat as text corpus
+        const sentences = source
+          .replace(/\n{2,}/g, '\n')
+          .split(/[.!?]+/)
+          .map(s => s.trim())
+          .filter(s => s.length > 10)
+          .slice(0, 1000);
+        
+        return sentences;
+      }
+    } catch (error) {
+      throw new Error(`Failed to process source: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Summarizes text using a simple heuristic approach
+   * TODO: Replace with actual LLM summarizer when available
+   */
+  private async summarizeText(text: string): Promise<string> {
+    // Simple heuristic summarization:
+    // 1. Take first and last sentences
+    // 2. Find sentences with keywords
+    // 3. Limit to reasonable length
+    
+    const sentences = text.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 10);
+    
+    if (sentences.length <= 3) {
+      return text;
+    }
+    
+    const keywords = ['important', 'key', 'main', 'primary', 'essential', 'critical', 'significant'];
+    const keywordSentences = sentences.filter(s => 
+      keywords.some(kw => s.toLowerCase().includes(kw))
+    );
+    
+    const summary = [
+      sentences[0], // First sentence
+      ...keywordSentences.slice(0, 2), // Up to 2 keyword sentences
+      sentences[sentences.length - 1] // Last sentence
+    ].join('. ');
+    
+    return summary.slice(0, 500); // Limit to 500 characters
   }
 }
 
