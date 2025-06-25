@@ -5,12 +5,12 @@
  * model interactions.
  */
 
-import * as tf from '@tensorflow/tfjs-node';
+import type * as tf from '@tensorflow/tfjs-node';
 import { z } from 'zod';
 
 // Core Tensor Operations
 export type ITensor = tf.Tensor;
-export type TensorContainer = { [key: string]: tf.Tensor | TensorContainer };
+export interface TensorContainer { [key: string]: tf.Tensor | TensorContainer }
 
 /**
  * Creates a wrapped tensor from a TensorFlow.js tensor.
@@ -270,10 +270,128 @@ export interface IHierarchicalMemoryState extends IMemoryState {
 }
 
 export interface IExtendedMemoryState extends IMemoryState {
-  episodicMemory: tf.Tensor2D;
-  semanticMemory: tf.Tensor2D;
-  episodicTimestamps: tf.Tensor1D;
-  semanticConfidence: tf.Tensor1D;
+  // Hierarchical memory tiers
+  workingMemory: tf.Tensor2D;      // Immediate, high-capacity buffer
+  shortTermMemory: tf.Tensor2D;    // Temporary storage for recent items
+  longTermMemory: tf.Tensor2D;     // Persistent storage for important items
+  
+  // Episodic vs Semantic distinction
+  episodicMemory: tf.Tensor2D;     // Time-bound, context-specific memories
+  semanticMemory: tf.Tensor2D;     // Abstract, generalized knowledge
+  
+  // Temporal information
+  workingTimestamps: tf.Tensor1D;   // When items entered working memory
+  shortTermTimestamps: tf.Tensor1D; // When items entered short-term memory
+  longTermTimestamps: tf.Tensor1D;  // When items entered long-term memory
+  episodicTimestamps: tf.Tensor1D;  // When episodic memories were formed
+  semanticTimestamps: tf.Tensor1D;  // When semantic knowledge was consolidated
+  
+  // Access patterns and confidence
+  workingAccessCounts: tf.Tensor1D;
+  shortTermAccessCounts: tf.Tensor1D;
+  longTermAccessCounts: tf.Tensor1D;
+  episodicAccessCounts: tf.Tensor1D;
+  semanticAccessCounts: tf.Tensor1D;
+  
+  // Memory quality metrics
+  episodicRecency: tf.Tensor1D;     // Recency scores for episodic memories
+  semanticConfidence: tf.Tensor1D;  // Confidence scores for semantic knowledge
+  memoryImportance: tf.Tensor1D;    // Importance scores for promotion/demotion
+  surpriseScores: tf.Tensor1D;      // Surprise scores for memory consolidation
+  
+  // Memory type flags (0 = working, 1 = short-term, 2 = long-term, 3 = episodic, 4 = semantic)
+  memoryTiers: tf.Tensor1D;
+  memoryTypes: tf.Tensor1D;
+}
+
+/**
+ * Memory statistics for monitoring and debugging
+ */
+export interface IMemoryStats {
+  // Tier counts
+  workingCount: number;
+  shortTermCount: number;
+  longTermCount: number;
+  
+  // Type counts
+  episodicCount: number;
+  semanticCount: number;
+  
+  // Memory utilization
+  totalMemoryUsed: number;
+  memoryUtilization: number; // percentage
+  
+  // Quality metrics
+  averageImportance: number;
+  averageConfidence: number;
+  averageRecency: number;
+  
+  // Promotion/Demotion activity
+  recentPromotions: number;
+  recentDemotions: number;
+  
+  // Temporal distribution
+  oldestMemoryAge: number;
+  newestMemoryAge: number;
+  averageMemoryAge: number;
+}
+
+/**
+ * Promotion and demotion rules for memory tier management
+ */
+export interface IMemoryPromotionRules {
+  // Working memory → Short-term memory
+  workingToShortTerm: {
+    accessThreshold: number;     // minimum access count
+    timeThreshold: number;       // minimum time in working memory (ms)
+    importanceThreshold: number; // minimum importance score
+  };
+  
+  // Short-term memory → Long-term memory
+  shortTermToLongTerm: {
+    accessThreshold: number;
+    timeThreshold: number;
+    importanceThreshold: number;
+    reinforcementCount: number;  // number of reinforcements needed
+  };
+  
+  // Episodic → Semantic consolidation
+  episodicToSemantic: {
+    generalityThreshold: number; // how general/abstract the memory is
+    confidenceThreshold: number; // confidence in the knowledge
+    abstractionLevel: number;    // level of abstraction achieved
+  };
+  
+  // Demotion thresholds
+  demotionRules: {
+    lowAccessPenalty: number;    // penalty for infrequent access
+    ageDecayRate: number;        // how much importance decays over time
+    forgettingThreshold: number; // when to demote/forget memories
+  };
+}
+
+/**
+ * Retrieval weighting strategies for different memory types
+ */
+export interface IRetrievalWeights {
+  episodic: {
+    recencyWeight: number;      // how much to weight recent memories
+    contextWeight: number;      // how much to weight contextual similarity
+    emotionalWeight: number;    // how much to weight emotional significance
+  };
+  
+  semantic: {
+    similarityWeight: number;   // how much to weight conceptual similarity
+    confidenceWeight: number;   // how much to weight confidence scores
+    generalityWeight: number;   // how much to weight general applicability
+  };
+  
+  // Combined retrieval weights
+  combined: {
+    episodicBias: number;       // bias toward episodic memories
+    semanticBias: number;       // bias toward semantic knowledge
+    tierPreference: number[];   // preference weights for each memory tier
+  };
 }
 
 export interface IQuantizedMemoryState {
@@ -356,6 +474,14 @@ export interface IMemoryModel {
   storeMemoryWithType?(text: string, isEpisodic?: boolean): Promise<void>;
   recallMemoryByType?(query: string, type?: 'episodic' | 'semantic' | 'both', topK?: number): Promise<tf.Tensor2D[]>;
   recallAndDistill?(query: string, topK?: number): Promise<tf.Tensor2D>;
+
+  // Workflow-specific methods
+  storeWorkflowMemory?(type: string, data: any): Promise<void>;
+  getRelevantContext?(query: string): Promise<any>;
+  findSimilarContent?(content: string): Promise<Array<{ score: number; content: string }>>;
+  getWorkflowHistory?(type: string, limit: number): Promise<any[]>;
+  shutdown?(): Promise<void>;
+  getHealthStatus?(): Promise<any>;
 }
 
 // --- Internal/Specific State Types ---
@@ -377,7 +503,7 @@ export interface IQuantizedMemoryStateInternal {
   shortTerm: Uint8Array;
   longTerm: Uint8Array;
   meta: Uint8Array;
-  quantizationRanges: { min: number; max: number }[];
+  quantizationRanges: Array<{ min: number; max: number }>;
 }
 
 // --- Utility Types ---
@@ -385,19 +511,297 @@ export interface IQuantizedMemoryStateInternal {
 /**
  * Maps string representations of data types to TensorFlow.js DataType enum strings.
  */
-export type DataTypeMap = {
+export interface DataTypeMap {
   float32: 'float32';
   int32: 'int32';
   bool: 'bool';
   string: 'string';
   complex64: 'complex64';
   uint8?: 'uint8'; // Optional, used for boolean storage sometimes
-};
+}
+
+// ====== WORKFLOW TYPES ======
+
+export interface WorkflowConfig {
+  repository: {
+    owner: string;
+    name: string;
+    branch: string;
+  };
+  features: {
+    autoRelease: ReleaseConfig;
+    issueManagement: IssueConfig;
+    feedback: FeedbackConfig;
+    labeling: LabelConfig;
+    linting: LintConfig;
+  };
+  integrations: {
+    github: GitHubIntegration;
+    notifications: NotificationSystem;
+    analytics?: AnalyticsConfig;
+  };
+  memory: {
+    titanConfig: TitanMemoryConfig;
+    persistence?: PersistenceConfig;
+  };
+}
+
+export interface ReleaseConfig {
+  versionBump: "patch" | "minor" | "major";
+  triggerConditions: {
+    commitCount: number;
+    timeThreshold: string;
+    featureFlags: string[];
+  };
+  channels: {
+    stable: string;
+    beta: string;
+    alpha: string;
+  };
+}
+
+export interface IssueConfig {
+  autoLabel: boolean;
+  autoAssign: boolean;
+  duplicateDetection: boolean;
+  templates: string[];
+}
+
+export interface FeedbackConfig {
+  channels: {
+    github: {
+      issues: boolean;
+      discussions: boolean;
+      pullRequests: boolean;
+    };
+    external: {
+      slack: boolean;
+      discord: boolean;
+      email: boolean;
+      surveys: boolean;
+    };
+    analytics: {
+      errorTracking: boolean;
+      usageMetrics: boolean;
+      performanceMetrics: boolean;
+    };
+  };
+}
+
+export interface LabelConfig {
+  autoLabeling: boolean;
+  taxonomy: LabelTaxonomy;
+  rules: LabelingRules;
+}
+
+export interface LintConfig {
+  levels: {
+    syntax: {
+      enabled: boolean;
+      tools: string[];
+      failOnError: boolean;
+    };
+    style: {
+      enabled: boolean;
+      config: string;
+      autoFix: boolean;
+    };
+    security: {
+      enabled: boolean;
+      tools: string[];
+      severity: "error" | "warning";
+    };
+    performance: {
+      enabled: boolean;
+      thresholds: Record<string, number>;
+    };
+  };
+  integrations: {
+    preCommit: boolean;
+    prChecks: boolean;
+    cicd: boolean;
+  };
+}
+
+export interface GitHubIntegration {
+  authentication: {
+    token: string;
+    app?: GitHubApp;
+  };
+  permissions: {
+    repositories: string[];
+    scopes: string[];
+  };
+  webhooks: {
+    events: string[];
+    secret: string;
+    url: string;
+  };
+}
+
+export interface GitHubApp {
+  id: string;
+  privateKey: string;
+  installationId?: string;
+}
+
+export interface NotificationSystem {
+  channels: {
+    slack?: SlackConfig;
+    email?: EmailConfig;
+    webhook?: WebhookConfig;
+  };
+  templates: {
+    success: string;
+    failure: string;
+    warning: string;
+  };
+  routing: {
+    rules: RoutingRule[];
+    fallback: string;
+  };
+}
+
+export interface SlackConfig {
+  webhook: string;
+  channel: string;
+  botToken?: string;
+}
+
+export interface EmailConfig {
+  smtp: {
+    host: string;
+    port: number;
+    secure: boolean;
+    auth: {
+      user: string;
+      pass: string;
+    };
+  };
+  from: string;
+  to: string[];
+}
+
+export interface WebhookConfig {
+  url: string;
+  secret?: string;
+  headers?: Record<string, string>;
+}
+
+export interface RoutingRule {
+  condition: string;
+  target: string;
+}
+
+export interface AnalyticsConfig {
+  provider: string;
+  apiKey?: string;
+  endpoint?: string;
+}
+
+export interface PersistenceConfig {
+  type: 'file' | 'database' | 'redis';
+  connection?: string;
+  options?: Record<string, any>;
+}
+
+export interface LabelTaxonomy {
+  type: Record<string, string>;
+  priority: Record<string, string>;
+  component: Record<string, string>;
+  status: Record<string, string>;
+}
+
+export interface LabelingRules {
+  textPatterns: Array<{
+    pattern: RegExp;
+    labels: string[];
+    confidence: number;
+  }>;
+  filePatterns: Array<{
+    pattern: string;
+    labels: string[];
+  }>;
+  userRoles: Array<{
+    role: string;
+    defaultLabels: string[];
+  }>;
+  contextual: Array<{
+    condition: string;
+    labels: string[];
+  }>;
+}
+
+export interface IssueClassification {
+  type: "bug" | "feature" | "enhancement" | "question" | "documentation";
+  priority: "critical" | "high" | "medium" | "low";
+  complexity: "trivial" | "simple" | "moderate" | "complex";
+  component: string[];
+  estimatedHours?: number;
+  dependencies?: string[];
+}
+
+export interface ReleasePR {
+  title: string;
+  body: string;
+  labels: string[];
+  assignees: string[];
+  reviewers: string[];
+  milestone?: string;
+  metadata: {
+    changeType: "breaking" | "feature" | "fix" | "docs";
+    affectedComponents: string[];
+    testCoverage: number;
+    performanceImpact?: string;
+  };
+}
+
+export interface FeedbackItem {
+  id: string;
+  source: string;
+  timestamp: Date;
+  content: string;
+  sentiment: "positive" | "negative" | "neutral";
+  topics: string[];
+  priority: number;
+  actionItems: string[];
+  metadata: Record<string, any>;
+}
+
+export interface WorkflowStatus {
+  state: 'initializing' | 'ready' | 'running' | 'error' | 'stopped';
+  lastUpdate: Date;
+  activeWorkflows: Array<{
+    id: string;
+    name: string;
+    startTime: Date;
+    status: string;
+  }>;
+  health: 'healthy' | 'unhealthy' | 'unknown';
+}
+
+export interface WorkflowEvent {
+  id: string;
+  name: string;
+  type: string;
+  params?: Record<string, any>;
+  result?: any;
+  error?: Error;
+  executionTime?: number;
+}
+
+export interface WorkflowMetrics {
+  totalWorkflows: number;
+  successfulWorkflows: number;
+  failedWorkflows: number;
+  averageExecutionTime: number;
+  memoryUsage: number;
+  lastMetricsUpdate: Date;
+}
 
 /**
- * Represents capabilities of the MCP server.
+ * Alias for TitanMemoryModel for workflow compatibility
  */
-export interface McpServer {
-  tool(name: string, schema: z.ZodRawShape | string, handler: Function): void;
-  connect(transport: Transport): Promise<void>;
-}
+export type TitanMemorySystem = IMemoryModel;
+
+// ====== END WORKFLOW TYPES ======

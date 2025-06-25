@@ -1,4 +1,4 @@
-import { Transport, CallToolRequest, CallToolResult } from './types.js';
+import type { Transport, CallToolRequest, CallToolResult } from './types.js';
 import WebSocket from 'ws';
 import * as readline from 'readline';
 import { z } from 'zod';
@@ -23,7 +23,7 @@ export class WebSocketTransport implements Transport {
       this.ws.onerror = (error) => reject(error);
 
       this.ws.onmessage = async (event) => {
-        if (!this.requestHandler) return;
+        if (!this.requestHandler) {return;}
         try {
           const rawRequest = JSON.parse(event.data.toString());
           const request = CallToolRequestSchema.parse(rawRequest); // Validate

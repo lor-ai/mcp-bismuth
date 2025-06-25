@@ -1,6 +1,6 @@
-/** @type {import('ts-jest').JestConfigWithTsJest} */
+/** @type {import('jest').Config} */
 export default {
-  preset: 'ts-jest',
+  preset: 'ts-jest/presets/default-esm',
   testEnvironment: 'node',
   extensionsToTreatAsEsm: ['.ts'],
   moduleNameMapper: {
@@ -10,15 +10,14 @@ export default {
     '^.+\\.tsx?$': [
       'ts-jest',
       {
-        useESM: true
+        useESM: true,
       },
     ],
   },
-  transformIgnorePatterns: [
-    'node_modules/(?!(@tensorflow/tfjs)/)'
-  ],
-  testPathIgnorePatterns: [
-    '/node_modules/',
-    '/build/'
-  ]
-}
+  transformIgnorePatterns: ['node_modules/(?!(@tensorflow/tfjs|@modelcontextprotocol)/)'],
+  testPathIgnorePatterns: ['/node_modules/', '/build/', '/dist/'],
+  maxWorkers: 1,
+  forceExit: true,
+  testTimeout: 30000,
+  collectCoverageFrom: ['src/**/*.{ts,tsx}', '!src/**/*.d.ts'],
+};

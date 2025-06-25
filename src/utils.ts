@@ -44,7 +44,7 @@ export class MemoryManager {
 
     public validateVectorShape(tensor: tf.Tensor, expectedShape: number[]): boolean {
         return tf.tidy(() => {
-            if (tensor.shape.length !== expectedShape.length) return false;
+            if (tensor.shape.length !== expectedShape.length) {return false;}
             return tensor.shape.every((dim, i) => expectedShape[i] === -1 || dim === expectedShape[i]);
         });
     }
@@ -132,13 +132,13 @@ export class VectorProcessor {
                     }
                     if (typeof input[0] === 'number') {
                         // It's 1D, convert to 2D [1, N]
-                        return tf.tensor1d(input as number[]).expandDims(0);
+                        return tf.tensor1d(input).expandDims(0);
                     } else {
                         // Assume it's already 2D or compatible
                         // Add more robust checking if needed
                         // Attempt to create tensor2d, catch potential errors
                         try {
-                            return tf.tensor2d(input as number[][]);
+                            return tf.tensor2d(input as unknown as number[][]);
                         } catch (e) {
                             console.error("Failed to create tensor2d from array:", e);
                             throw new Error("Invalid array format for tensor2d");
@@ -188,7 +188,7 @@ export class VectorProcessor {
      * @param maxLength Optional maximum sequence length.
      * @returns A promise resolving to the encoded tensor.
      */
-    public async encodeText(text: string, maxLength: number = 512): Promise<tf.Tensor> {
+    public async encodeText(text: string, maxLength = 512): Promise<tf.Tensor> {
         // Use wrapWithMemoryManagementAsync for async tensor operations
         return this.memoryManager.wrapWithMemoryManagementAsync(async () => {
             try {
@@ -199,7 +199,7 @@ export class VectorProcessor {
 
                 // Simple character code encoding as a fallback placeholder
                 const tokens = text.split('').map(char => char.charCodeAt(0));
-                let paddedArray = tokens.slice(0, maxLength);
+                const paddedArray = tokens.slice(0, maxLength);
                 while (paddedArray.length < maxLength) {
                     paddedArray.push(0); // Pad with 0
                 }
@@ -272,9 +272,9 @@ export function validateTensor(tensor: tf.Tensor | null | undefined): boolean {
 }
 
 export function validateTensorShape(tensor: tf.Tensor | null | undefined, expectedShape: number[]): boolean {
-    if (!validateTensor(tensor)) return false;
+    if (!validateTensor(tensor)) {return false;}
     const shape = tensor!.shape;
-    if (shape.length !== expectedShape.length) return false;
+    if (shape.length !== expectedShape.length) {return false;}
     return shape.every((dim, i) => expectedShape[i] === -1 || expectedShape[i] === dim);
 }
 

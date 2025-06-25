@@ -1,0 +1,12 @@
+dist/
+node_modules/
+coverage/
+*.md
+*.json
+.titan_memory/
+memory.json/
+test-weights*
+.cursor/
+*.pdf
+*.bin
+package-lock.json 

@@ -2,6 +2,8 @@
 
 **This file documents the tool usage for the @henryhawke/mcp-titan MCP server. It is fully compatible with Cursor and Claude MCP clients. No human intervention is required for operation except for adding the mcp-titan llm-system-prompt to the cursor rules. All tool names, parameters, and return types are accurate as of the latest implementation.**
 
+For a comprehensive overview of the system architecture and component interactions, see [architecture-overview.md](architecture-overview.md).
+
 ## 🛠️ MCP Tool Usage Reference
 
 ### Available Tools

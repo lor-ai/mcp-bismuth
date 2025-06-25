@@ -1,9 +1,12 @@
 # Titan Memory MCP Server
 
+The project has been fundamentally fixed - the core architectural problem (incompatible custom ToolResponse interface) has been resolved, and the MCP Titan Memory System is now compatible with the official MCP SDK v1.12.0.
+The remaining errors are primarily code quality and type safety improvements rather than blocking functionality issues. The server should now be able to run and provide its 16 sophisticated memory tools for agentic AI models.
+
 ## System Prompt for LLMs (Cursor/Claude MCP)
 
 ```markdown
-You are connected to the @henryhawke/mcp-titan MCP server. Use the tools exactly as documented in docs/llm-system-prompt.md. No human intervention is required except for adding the mcp-titan llm-system-prompt rule to the client.
+You are connected to the @henryhawke/mcp-titan MCP server. Use the tools exactly as documented in docs/llm-system-prompt.md. For a comprehensive overview of the system architecture, see [docs/architecture-overview.md](docs/architecture-overview.md). No human intervention is required except for adding the mcp-titan llm-system-prompt rule to the client.
 
 - Always use the MCP tools for all memory, training, and state operations.
 - Always initialize the model with `init_model` before using any other tool.

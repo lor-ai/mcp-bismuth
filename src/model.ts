@@ -1,22 +1,26 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * @fileovertitle Titan Memory Model 2.0 - Neural Memory Architecture with Transformer-XL Inspired Mechanisms
  */
 
 import * as tf from '@tensorflow/tfjs-node';
-import { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, TensorContainer, unwrapTensor, wrapTensor, IMemoryModel, ITelemetryData, TensorError, MemoryError, IHierarchicalMemoryState, IExtendedMemoryState, IQuantizedMemoryState, IHierarchicalMemoryStateInternal, IQuantizedMemoryStateInternal, DataTypeMap } from './types.js';
+import type { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, IMemoryModel, ITelemetryData, IHierarchicalMemoryStateInternal, IQuantizedMemoryStateInternal } from './types.js';
+import { unwrapTensor, wrapTensor, TensorError, MemoryError, type IHierarchicalMemoryState, type IExtendedMemoryState, type IQuantizedMemoryState } from './types.js';
 import * as fs from 'fs/promises';
 import { z } from 'zod';
-import { checkNullOrUndefined, validateTensor, validateTensorShape, SafeTensorOps } from './utils.js';
-import { VectorProcessor } from './utils.js';
+import { VectorProcessor, SafeTensorOps } from './utils.js';
+import { AdvancedTokenizer, type TokenizerConfig } from './tokenizer/index.js';
 
 // Add telemetry implementation
 class ModelTelemetry {
   private static instance: ModelTelemetry;
   private telemetryData: ITelemetryData[] = [];
-  private maxEntries: number = 1000;
-  private enabled: boolean = true;
+  private maxEntries = 1000;
+  private enabled = true;
 
-  private constructor() { }
+  private constructor() {
+    // Constructor initialization
+  }
 
   public static getInstance(): ModelTelemetry {
     if (!ModelTelemetry.instance) {
@@ -26,7 +30,7 @@ class ModelTelemetry {
   }
 
   public recordOperation(operation: string, metrics?: Record<string, number>): () => void {
-    if (!this.enabled) return () => { };
+    if (!this.enabled) { return () => { }; }
 
     const startTime = performance.now();
     const startMemory = tf.memory();
@@ -57,7 +61,7 @@ class ModelTelemetry {
   }
 
   public recordError(operation: string, error: Error): void {
-    if (!this.enabled) return;
+    if (!this.enabled) { return; }
 
     const telemetryEntry: ITelemetryData = {
       timestamp: Date.now(),
@@ -87,7 +91,7 @@ class ModelTelemetry {
     return [...this.telemetryData];
   }
 
-  public getAverageMetrics(operation: string, lastN: number = 10): Record<string, number> {
+  public getAverageMetrics(operation: string, lastN = 10): Record<string, number> {
     const relevantEntries = this.telemetryData
       .filter(entry => entry.operation === operation)
       .slice(-lastN);
@@ -108,9 +112,9 @@ class ModelTelemetry {
 
     // Add custom metrics if they exist
     if (relevantEntries[0].metrics) {
-      Object.keys(relevantEntries[0].metrics!).forEach(metricKey => {
+      Object.keys(relevantEntries[0].metrics).forEach(metricKey => {
         result[`avg${metricKey}`] = relevantEntries.reduce(
-          (sum, entry) => sum + (entry.metrics?.[metricKey] || 0),
+          (sum, entry) => sum + (entry.metrics?.[metricKey] ?? 0),
           0
         ) / relevantEntries.length;
       });
@@ -226,8 +230,8 @@ export class TitanMemoryModel implements IMemoryModel {
   private similarityNetwork!: tf.LayersModel;
   private optimizer!: tf.Optimizer;
   private stepCount = 0;
-  private vocabulary: Map<string, number> = new Map();
-  private reverseVocabulary: Map<number, string> = new Map();
+  private vocabulary = new Map<string, number>();
+  private reverseVocabulary = new Map<number, string>();
 
   // Enhanced memory state with temporal dynamics
   private memoryState: IMemoryState = {
@@ -239,25 +243,85 @@ export class TitanMemoryModel implements IMemoryModel {
     surpriseHistory: tf.zeros([0])
   };
 
+  // Extended memory state with hierarchical tiers and episodic/semantic distinction
+  private extendedMemoryState: IExtendedMemoryState | null = null;
+  
+  // Memory promotion/demotion rules
+  private promotionRules: IMemoryPromotionRules = {
+    workingToShortTerm: {
+      accessThreshold: 3,
+      timeThreshold: 30000, // 30 seconds
+      importanceThreshold: 0.6
+    },
+    shortTermToLongTerm: {
+      accessThreshold: 5,
+      timeThreshold: 300000, // 5 minutes
+      importanceThreshold: 0.8,
+      reinforcementCount: 3
+    },
+    episodicToSemantic: {
+      generalityThreshold: 0.7,
+      confidenceThreshold: 0.85,
+      abstractionLevel: 0.6
+    },
+    demotionRules: {
+      lowAccessPenalty: 0.1,
+      ageDecayRate: 0.99,
+      forgettingThreshold: 0.1
+    }
+  };
+  
+  // Retrieval weights for different memory types
+  private retrievalWeights: IRetrievalWeights = {
+    episodic: {
+      recencyWeight: 0.6,
+      contextWeight: 0.3,
+      emotionalWeight: 0.1
+    },
+    semantic: {
+      similarityWeight: 0.5,
+      confidenceWeight: 0.3,
+      generalityWeight: 0.2
+    },
+    combined: {
+      episodicBias: 0.4,
+      semanticBias: 0.6,
+      tierPreference: [0.8, 0.6, 0.4] // working, short-term, long-term
+    }
+  };
+  
+  // Memory statistics tracking
+  private memoryStats: {
+    promotions: { recent: number; total: number };
+    demotions: { recent: number; total: number };
+    lastStatsUpdate: number;
+  } = {
+    promotions: { recent: 0, total: 0 },
+    demotions: { recent: 0, total: 0 },
+    lastStatsUpdate: Date.now()
+  };
+
   // Add hierarchical memory properties
-  private hierarchicalLevels: number = 3;
+  private hierarchicalLevels = 3;
   private hierarchicalMemory: IHierarchicalMemoryStateInternal | null = null;
 
   // Add quantization properties
   private quantizedMemory: IQuantizedMemoryStateInternal | null = null;
-  private quantizationBits: number = 8;
-  private quantizationRanges: { min: number; max: number }[] = [];
+  private quantizationBits = 8;
+  private quantizationRanges: Array<{ min: number; max: number }> = [];
 
   // Add contrastive learning properties
   private contrastiveBuffer: tf.Tensor[] = [];
-  private contrastiveBufferSize: number = 128;
-  private contrastiveTemperature: number = 0.07;
+  private contrastiveBufferSize = 128;
+  private contrastiveTemperature = 0.07;
 
   // Add encoder and decoder properties
   private encoder!: tf.LayersModel;
   private decoder!: tf.LayersModel;
   private tokenizer: any = null;
-  private vocabSize: number = 10000;
+  private advancedTokenizer: AdvancedTokenizer | null = null;
+  private vocabSize = 10000;
+  private useLegacyCharEncoding = false;
 
   private vectorProcessor: VectorProcessor = VectorProcessor.getInstance();
 
@@ -297,7 +361,40 @@ export class TitanMemoryModel implements IMemoryModel {
   constructor(config?: Partial<TitanMemoryConfig>) {
     // Initialize with empty config first
     this.config = ModelConfigSchema.parse(config || {});
-    // Always initialize a basic tokenizer
+    // Initialize tokenizer based on configuration (async, will be handled during initialize())
+    this.initializeTokenizer().catch(error => {
+      console.warn('Failed to initialize tokenizer in constructor:', error);
+      this.useLegacyCharEncoding = true;
+    });
+  }
+
+  /**
+   * Initialize tokenizer (advanced BPE or legacy character-based)
+   */
+  private async initializeTokenizer(): Promise<void> {
+    const tokenizerConfig: TokenizerConfig = {
+      vocabSize: this.config.vocabSize,
+      embeddingDim: Math.min(512, Math.max(256, this.config.inputDim)),
+      hiddenSize: this.config.hiddenDim,
+      maxSequenceLength: this.config.maxSequenceLength,
+      useLegacyCharMode: this.useLegacyCharEncoding,
+      enableBootstrapping: true,
+      useCharFallback: true
+    };
+
+    this.advancedTokenizer = new AdvancedTokenizer(tokenizerConfig);
+    
+    // Initialize the advanced tokenizer
+    try {
+      await this.advancedTokenizer.initialize();
+      console.log('Advanced tokenizer initialized successfully');
+    } catch (error) {
+      console.warn('Failed to initialize advanced tokenizer, falling back to legacy mode:', error);
+      this.useLegacyCharEncoding = true;
+      this.advancedTokenizer.setLegacyMode(true);
+    }
+    
+    // Keep legacy tokenizer for backward compatibility
     this.tokenizer = {
       encode: (text: string) => Array.from(text).map(c => c.charCodeAt(0) % this.vocabSize),
       decode: (tokens: number[]) => tokens.map(t => String.fromCharCode(t)).join('')
@@ -419,22 +516,61 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   /**
-   * Encodes text input to tensor
+   * Encodes text input to tensor using advanced BPE tokenizer
    * @param text The text to encode
    * @returns The encoded tensor
    */
   public async encodeText(text: string): Promise<tf.Tensor1D> {
     return this.withErrorHandling('encodeText', async () => {
-      if (!this.vectorProcessor) {
-        throw new Error('VectorProcessor not initialized');
+      // Use advanced tokenizer if available, otherwise fall back to legacy mode
+      if (this.advancedTokenizer && !this.useLegacyCharEncoding) {
+        try {
+          const tokenizationResult = await this.advancedTokenizer.encode(text, {
+            maxLength: this.config.maxSequenceLength,
+            padding: true,
+            truncation: true
+          });
+          
+          // Convert 2D embeddings to 1D by taking mean across sequence dimension
+          const flattened = tf.mean(tokenizationResult.embeddings, 0) as tf.Tensor1D;
+          
+          // Dispose of intermediate tensors
+          tokenizationResult.embeddings.dispose();
+          tokenizationResult.attentionMask.dispose();
+          
+          return flattened;
+        } catch (error) {
+          console.warn('Advanced tokenizer failed, falling back to legacy mode:', error);
+          this.useLegacyCharEncoding = true;
+          if (this.advancedTokenizer) {
+            this.advancedTokenizer.setLegacyMode(true);
+          }
+        }
       }
-      const tensor = await this.vectorProcessor.encodeText(text, this.config.inputDim || 768);
-      if (tensor.rank === 2 && tensor.shape[0] === 1) {
-        return tensor.squeeze() as tf.Tensor1D;
-      } else if (tensor.rank === 1) {
-        return tensor as tf.Tensor1D;
+      
+      // Fallback to VectorProcessor or legacy character encoding
+      if (this.vectorProcessor) {
+        const tokenData = this.vectorProcessor.encodeText(text);
+        let result: tf.Tensor1D;
+        
+        if (tokenData instanceof Promise) {
+          result = (await tokenData) as tf.Tensor1D;
+        } else {
+          result = tokenData as tf.Tensor1D;
+        }
+        
+        if (result.shape.length !== 1) {
+          throw new Error('Encoded tensor has unexpected shape');
+        }
+        return result;
       } else {
-        throw new Error('Encoded tensor has unexpected shape');
+        // Final fallback: simple character encoding
+        const tokens = this.tokenizer.encode(text);
+        const paddedTokens = tokens.slice(0, this.config.maxSequenceLength);
+        while (paddedTokens.length < this.config.maxSequenceLength) {
+          paddedTokens.push(0);
+        }
+        return tf.tensor1d(paddedTokens.map((t: number) => t / this.vocabSize)); // Normalize
       }
     });
   }
@@ -465,35 +601,51 @@ export class TitanMemoryModel implements IMemoryModel {
   /**
    * Retrieves memory based on query
    */
-  private retrieveFromMemory(query: ITensor): ITensor {
+private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic'): ITensor {
     return this.withErrorHandling('retrieveFromMemory', () => {
-      // Calculate similarity between query and all memories
-      const similarities = tf.matMul(
-        this.memoryState.shortTerm,
-        unwrapTensor(query).reshape([unwrapTensor(query).shape[0], 1]),
-        false,
-        true
-      );
+      const extendedState = this.extendedMemoryState;
+      if (!extendedState) throw new MemoryError('Extended memory state not initialized');
 
-      // Apply softmax to get attention weights
-      const attentionWeights = tf.softmax(similarities);
+      const memorySource = type === 'episodic' ? extendedState.episodicMemory : extendedState.semanticMemory;
+      const weightsConfig = type === 'episodic' ? this.retrievalWeights.episodic : this.retrievalWeights.semantic;
 
-      // Update access counts
-      const newAccessCounts = this.memoryState.accessCounts.add(attentionWeights);
-      tf.dispose(this.memoryState.accessCounts);
-      this.memoryState.accessCounts = newAccessCounts;
+      // Calculate similarity or recency for retrieval
+      let weights: tf.Tensor;
 
-      // Weight memories by attention
-      const weightedMemory = tf.matMul(
-        attentionWeights,
-        this.memoryState.shortTerm,
-        true,
-        false
-      );
+      if (type === 'episodic') {
+        const similarities = tf.matMul(memorySource, unwrapTensor(query).reshape([-1, 1]), false, true);
+        const recencyScores = tf.sub(tf.scalar(Date.now()), extendedState.episodicTimestamps);
+        const weightedSum = tf.add(
+          tf.mul(similarities, weightsConfig.contextWeight),
+          tf.mul(recencyScores, weightsConfig.recencyWeight)
+        );
+        weights = tf.softmax(weightedSum);
+      } else {
+        const similarities = tf.matMul(memorySource, unwrapTensor(query).reshape([-1, 1]), false, true);
+        const confidenceScores = extendedState.semanticConfidence;
+        const weightedSum = tf.add(
+          tf.mul(similarities, weightsConfig.similarityWeight),
+          tf.mul(confidenceScores, weightsConfig.confidenceWeight)
+        );
+        weights = tf.softmax(weightedSum);
+      }
+
+      // Retrieve and weigh memories
+      const weightedMemory = tf.matMul(weights, memorySource, true, false);
+
+      // Update access counts for memory management
+      if (type === 'episodic') {
+        const newAccessCounts = extendedState.episodicAccessCounts.add(weights);
+        tf.dispose(extendedState.episodicAccessCounts);
+        extendedState.episodicAccessCounts = newAccessCounts;
+      } else {
+        const newAccessCounts = extendedState.semanticAccessCounts.add(weights);
+        tf.dispose(extendedState.semanticAccessCounts);
+        extendedState.semanticAccessCounts = newAccessCounts;
+      }
 
       // Clean up
-      tf.dispose(similarities);
-      tf.dispose(attentionWeights);
+      tf.dispose(weights);
 
       return wrapTensor(weightedMemory);
     });
@@ -573,6 +725,7 @@ export class TitanMemoryModel implements IMemoryModel {
     tf.tidy(() => {
       const memorySlots = this.config.memorySlots;
       const embeddingSize = this.config.memoryDim;
+      const currentTime = Date.now();
 
       // Initialize standard memory components
       this.memoryState = {
@@ -583,6 +736,11 @@ export class TitanMemoryModel implements IMemoryModel {
         accessCounts: tf.zeros([memorySlots]),
         surpriseHistory: tf.zeros([100]) // track last 100 surprise scores
       };
+
+      // Initialize extended memory state if episodic/semantic distinction is enabled
+      if (this.config.enableEpisodicSemanticDistinction) {
+        this.initializeExtendedMemoryState(memorySlots, embeddingSize, currentTime);
+      }
 
       // Initialize hierarchical memory if enabled
       if (this.config.useHierarchicalMemory) {
@@ -596,6 +754,63 @@ export class TitanMemoryModel implements IMemoryModel {
 
       console.log(`Memory initialized with ${memorySlots} slots and ${embeddingSize} dimensions`);
     });
+  }
+
+  private initializeExtendedMemoryState(memorySlots: number, embeddingSize: number, currentTime: number): void {
+    // Tier distribution: 40% working, 35% short-term, 25% long-term
+    const workingSlots = Math.floor(memorySlots * 0.4);
+    const shortTermSlots = Math.floor(memorySlots * 0.35);
+    const longTermSlots = memorySlots - workingSlots - shortTermSlots;
+    
+    // Type distribution: 60% episodic, 40% semantic
+    const episodicSlots = Math.floor(memorySlots * 0.6);
+    const semanticSlots = memorySlots - episodicSlots;
+
+    this.extendedMemoryState = {
+      ...this.memoryState,
+      
+      // Hierarchical memory tiers
+      workingMemory: tf.zeros([workingSlots, embeddingSize]),
+      shortTermMemory: tf.zeros([shortTermSlots, embeddingSize]),
+      longTermMemory: tf.zeros([longTermSlots, embeddingSize]),
+      
+      // Episodic vs Semantic distinction
+      episodicMemory: tf.zeros([episodicSlots, embeddingSize]),
+      semanticMemory: tf.zeros([semanticSlots, embeddingSize]),
+      
+      // Temporal information
+      workingTimestamps: tf.fill([workingSlots], currentTime),
+      shortTermTimestamps: tf.fill([shortTermSlots], currentTime),
+      longTermTimestamps: tf.fill([longTermSlots], currentTime),
+      episodicTimestamps: tf.fill([episodicSlots], currentTime),
+      semanticTimestamps: tf.fill([semanticSlots], currentTime),
+      
+      // Access patterns
+      workingAccessCounts: tf.zeros([workingSlots]),
+      shortTermAccessCounts: tf.zeros([shortTermSlots]),
+      longTermAccessCounts: tf.zeros([longTermSlots]),
+      episodicAccessCounts: tf.zeros([episodicSlots]),
+      semanticAccessCounts: tf.zeros([semanticSlots]),
+      
+      // Memory quality metrics
+      episodicRecency: tf.ones([episodicSlots]), // Start with neutral recency
+      semanticConfidence: tf.ones([semanticSlots]).mul(0.5), // Start with medium confidence
+      memoryImportance: tf.ones([memorySlots]).mul(0.5), // Start with medium importance
+      surpriseScores: tf.zeros([memorySlots]),
+      
+      // Memory classification (0=working, 1=short-term, 2=long-term)
+      memoryTiers: tf.concat([
+        tf.zeros([workingSlots]),           // Working memory = 0
+        tf.ones([shortTermSlots]),          // Short-term memory = 1  
+        tf.ones([longTermSlots]).mul(2)     // Long-term memory = 2
+      ]),
+      
+      // Memory types (0=episodic, 1=semantic)
+      memoryTypes: tf.concat([
+        tf.zeros([episodicSlots]),          // Episodic = 0
+        tf.ones([semanticSlots])            // Semantic = 1
+      ])
+    };
   }
 
   private validateMemoryState(state: IMemoryState): boolean {
@@ -636,7 +851,7 @@ export class TitanMemoryModel implements IMemoryModel {
       const expanded = embedding.reshape([1, -1]);
       return tf.matMul(this.memoryState.shortTerm, expanded)
         .div(tf.norm(this.memoryState.shortTerm, 2, 1).mul(tf.norm(expanded)))
-        .squeeze() as tf.Tensor1D;
+        .squeeze();
     });
   }
 
@@ -699,6 +914,10 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   public async recallMemory(query: string, topK = 5): Promise<tf.Tensor2D[]> {
+    const queryEmbedding = await this.encodeText(query);
+    if (this.config.useApproximateNearestNeighbors && this.memoryState.shortTerm.shape[0] > 2000) {
+      return this.annSearch(queryEmbedding, topK);
+    }
     const queryEmbedding = await this.encodeText(query);
     const similarities = this.calculateSimilarity(queryEmbedding);
 
@@ -986,7 +1205,7 @@ export class TitanMemoryModel implements IMemoryModel {
         let hierarchicalData = null;
         if (this.config.useHierarchicalMemory && this.hierarchicalMemory) {
           // Cast to Internal type to access tensor arrays
-          const internalHierarchicalMemory = this.hierarchicalMemory as IHierarchicalMemoryStateInternal;
+          const internalHierarchicalMemory = this.hierarchicalMemory;
           hierarchicalData = {
             levels: await Promise.all(internalHierarchicalMemory.levels.map(async (level: tf.Tensor) => await level.array())) as tf.TensorLike[], // levels can be multi-dimensional
             // Ensure each promise resolves to number[] before Promise.all creates number[][]
@@ -999,7 +1218,7 @@ export class TitanMemoryModel implements IMemoryModel {
         let quantizationData = null;
         if (this.config.enableQuantization && this.quantizedMemory) {
           // Cast to Internal type
-          const internalQuantizedMemory = this.quantizedMemory as IQuantizedMemoryStateInternal;
+          const internalQuantizedMemory = this.quantizedMemory;
           quantizationData = {
             // Convert Uint8Array to number[] for JSON
             shortTerm: Array.from(internalQuantizedMemory.shortTerm),
@@ -1029,7 +1248,7 @@ export class TitanMemoryModel implements IMemoryModel {
       } catch (error) {
         const err = error as Error; // Cast error
         console.error('Error saving model:', err);
-        throw new MemoryError('Failed to save model: ' + err.message); // Use casted error
+        throw new MemoryError(`Failed to save model: ${err.message}`); // Use casted error
       }
     });
   }
@@ -1084,7 +1303,7 @@ export class TitanMemoryModel implements IMemoryModel {
           if (!isMcpContextValue) {
             console.error('Error loading encoder/decoder models:', err);
           }
-          throw new MemoryError('Failed to load encoder/decoder models: ' + err.message); // Use casted error
+          throw new MemoryError(`Failed to load encoder/decoder models: ${err.message}`); // Use casted error
         }
 
         // Initialize optimizer
@@ -1119,7 +1338,7 @@ export class TitanMemoryModel implements IMemoryModel {
             if (!isMcpContextValue) {
               console.error('Error loading memory state:', err);
             }
-            throw new MemoryError('Failed to load memory state: ' + err.message); // Use casted error
+            throw new MemoryError(`Failed to load memory state: ${err.message}`); // Use casted error
           }
         } else {
           const isMcpContextValue = process.env.MCP_CONTEXT === 'true'; // Define and check
@@ -1207,7 +1426,7 @@ export class TitanMemoryModel implements IMemoryModel {
         if (!isMcpContextValue) {
           console.error('Error loading model:', err);
         }
-        throw new MemoryError('Failed to load model: ' + err.message); // Use casted error
+        throw new MemoryError(`Failed to load model: ${err.message}`); // Use casted error
       }
     });
   }
@@ -1298,14 +1517,16 @@ export class TitanMemoryModel implements IMemoryModel {
       if (this.config.enableQuantization) {
         try {
           const quantizationPath = `${path}/quantization.json`;
-          const quantizationData = JSON.parse(await fs.readFile(quantizationPath, 'utf-8'));
+          const quantizationData = JSON.parse(await fs.readFile(quantizationPath, 'utf-8')) as {
+            ranges: number[][];
+            bits: number;
+          };
 
-          this.quantizationRanges = quantizationData.ranges;
+          this.quantizationRanges = quantizationData.ranges as unknown as Array<{ min: number; max: number }>;
           this.quantizationBits = quantizationData.bits;
 
           // Initialize quantized memory
           this.initializeQuantization();
-          safeLog('Loaded quantization data from legacy format');
         } catch (error) {
           if (!isMcpContext) {
             console.warn('No quantization.json found in legacy format, initializing new quantization');
@@ -1326,7 +1547,7 @@ export class TitanMemoryModel implements IMemoryModel {
       if (!isMcpContext) {
         console.error('Error loading model in legacy format:', error);
       }
-      throw new MemoryError('Failed to load model in legacy format: ' + (error instanceof Error ? error.message : String(error)));
+      throw new MemoryError(`Failed to load model in legacy format: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1367,11 +1588,11 @@ export class TitanMemoryModel implements IMemoryModel {
       // Dispose of hierarchical memory
       if (this.hierarchicalMemory) {
         // Cast to internal type to iterate over tensor arrays
-        const internalHierarchicalMemory = this.hierarchicalMemory as IHierarchicalMemoryStateInternal;
-        internalHierarchicalMemory.levels.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
-        internalHierarchicalMemory.timestamps.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
-        internalHierarchicalMemory.accessCounts.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
-        internalHierarchicalMemory.surpriseScores.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) tensor.dispose(); });
+        const internalHierarchicalMemory = this.hierarchicalMemory;
+        internalHierarchicalMemory.levels.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) { tensor.dispose(); } });
+        internalHierarchicalMemory.timestamps.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) { tensor.dispose(); } });
+        internalHierarchicalMemory.accessCounts.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) { tensor.dispose(); } });
+        internalHierarchicalMemory.surpriseScores.forEach((tensor: tf.Tensor) => { if (tensor && !tensor.isDisposed) { tensor.dispose(); } });
       }
 
       // Dispose of contrastive buffer
@@ -1607,7 +1828,7 @@ export class TitanMemoryModel implements IMemoryModel {
 
       // Load weights into a map
       const weightMap = new Map<string, tf.Tensor>();
-      let offset = 4 + headerSize;
+      const offset = 4 + headerSize;
 
       for (const [name, info] of Object.entries(header.weights)) {
         const { shape, dtype, byteOffset, byteLength } = info as WeightInfo & { byteOffset: number, byteLength: number };
@@ -1618,7 +1839,7 @@ export class TitanMemoryModel implements IMemoryModel {
 
           // Create tensor based on dtype
           let tensor: tf.Tensor;
-          const dtypeStr = dtype as string;
+          const dtypeStr = dtype;
           // Explicitly check allowed dtypes
           if (dtypeStr === 'float32') {
             const values = new Float32Array(dataBuffer.buffer, dataBuffer.byteOffset, byteLength / 4);
@@ -1939,7 +2160,7 @@ export class TitanMemoryModel implements IMemoryModel {
       const result = this.forward(input, state);
 
       // Convert tensors to arrays for JSON serialization
-      const predicted = Array.from(await result.predicted.data()) as number[];
+      const predicted = Array.from(await result.predicted.data());
 
       // Get memory update as arrays
       const shortTermArray = await result.memoryUpdate.newState.shortTerm.array() as number[][];
@@ -2091,6 +2312,54 @@ export class TitanMemoryModel implements IMemoryModel {
   }
 
   /**
+   * Enable or disable legacy character encoding mode for backward compatibility
+   * @param useLegacyMode Whether to use legacy character-based encoding
+   */
+  public setLegacyCharEncoding(useLegacyMode: boolean): void {
+    this.useLegacyCharEncoding = useLegacyMode;
+    if (this.advancedTokenizer) {
+      this.advancedTokenizer.setLegacyMode(useLegacyMode);
+    }
+    console.log(`Text encoding mode set to: ${useLegacyMode ? 'legacy character' : 'advanced BPE'}`);
+  }
+
+  /**
+   * Get current text encoding mode
+   * @returns Whether legacy character encoding is enabled
+   */
+  public isLegacyCharEncoding(): boolean {
+    return this.useLegacyCharEncoding;
+  }
+
+  /**
+   * Get tokenizer statistics
+   * @returns Statistics about the tokenizer usage
+   */
+  public getTokenizerStats(): {
+    mode: 'BPE' | 'Legacy';
+    vocabSize?: number;
+    mergesCount?: number;
+    embeddingDim?: number;
+    bootstrapCount?: number;
+  } {
+    if (this.advancedTokenizer && !this.useLegacyCharEncoding) {
+      const stats = this.advancedTokenizer.getStats();
+      return {
+        mode: 'BPE',
+        vocabSize: stats.bpe.vocabSize,
+        mergesCount: stats.bpe.mergesCount,
+        embeddingDim: stats.embedding.embeddingDim,
+        bootstrapCount: stats.bootstrapCount
+      };
+    } else {
+      return {
+        mode: 'Legacy',
+        vocabSize: this.vocabSize
+      };
+    }
+  }
+
+  /**
    * Initializes hierarchical memory structure if enabled in config
    */
   private initializeHierarchicalMemory(): void {
@@ -2203,7 +2472,7 @@ export class TitanMemoryModel implements IMemoryModel {
         }
 
         // Update surprise history with exponential decay
-        let rawSurpriseScores = hierarchicalMemory.surpriseScores[levelIndex].arraySync();
+        const rawSurpriseScores = hierarchicalMemory.surpriseScores[levelIndex].arraySync();
         let newSurpriseScores: number[];
         if (Array.isArray(rawSurpriseScores)) {
           // Deeply flatten and filter to number[]
@@ -2228,7 +2497,7 @@ export class TitanMemoryModel implements IMemoryModel {
         const finalMemory: tf.TensorLike = Array.isArray(newMemory) && Array.isArray(newMemory[0]) ? newMemory : [[newMemory]];
         const finalTimestamps: number[] = Array.isArray(newTimestamps) && typeof newTimestamps[0] === 'number' ? newTimestamps as number[] : [Number(newTimestamps)];
         const finalAccessCounts: number[] = Array.isArray(newAccessCountsArray) && typeof newAccessCountsArray[0] === 'number' ? newAccessCountsArray as number[] : [Number(newAccessCountsArray)];
-        const finalSurpriseScores: number[] = Array.isArray(newSurpriseScores) && typeof newSurpriseScores[0] === 'number' ? newSurpriseScores as number[] : [Number(newSurpriseScores)];
+        const finalSurpriseScores: number[] = Array.isArray(newSurpriseScores) && typeof newSurpriseScores[0] === 'number' ? newSurpriseScores : [Number(newSurpriseScores)];
 
         // Use tf.tensor for potentially multi-dimensional, tf.tensor1d for known 1D
         levels[levelIndex] = tf.tensor(finalMemory);
@@ -2382,8 +2651,8 @@ export class TitanMemoryModel implements IMemoryModel {
           // Find min/max for this dimension
           for (let i = 0; i < shape[0]; i++) {
             const val = values[i][dim];
-            if (val < min) min = val;
-            if (val > max) max = val;
+            if (val < min) { min = val; }
+            if (val > max) { max = val; }
           }
 
           // Update range with exponential moving average
@@ -2424,7 +2693,7 @@ export class TitanMemoryModel implements IMemoryModel {
    * @param ranges Optional quantization ranges for per-dimension dequantization
    * @returns The dequantized tensor
    */
-  private dequantizeTensor(quantized: Uint8Array, shape: number[], ranges?: { min: number; max: number }[]): tf.Tensor {
+  private dequantizeTensor(quantized: Uint8Array, shape: number[], ranges?: Array<{ min: number; max: number }>): tf.Tensor {
     return this.withErrorHandling('dequantizeTensor', () => {
       const totalElements = shape.reduce((a, b) => a * b, 1);
       const dequantized = new Float32Array(totalElements);
@@ -2562,7 +2831,7 @@ export class TitanMemoryModel implements IMemoryModel {
         }
         flatSurprise.push(unwrapTensor(surprise).dataSync()[0]);
         // Copy back to newSurpriseHistory if needed
-        for (let i = 0; i < flatSurprise.length; i++) newSurpriseHistory[i] = flatSurprise[i];
+        for (let i = 0; i < flatSurprise.length; i++) { newSurpriseHistory[i] = flatSurprise[i]; }
       } else {
         // Handle non-array case
         safeLog("Warning: newSurpriseHistory was not an array during updateMemory.");
@@ -2601,3 +2870,6 @@ export class TitanMemoryModel implements IMemoryModel {
     await this.load(path);
   }
 }
+
+// Export alias for workflow compatibility
+export const TitanMemorySystem = TitanMemoryModel;

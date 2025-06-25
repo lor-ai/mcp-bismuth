@@ -1,10 +1,12 @@
 import * as tf from '@tensorflow/tfjs-node';
-import {
+import type {
   Transport,
   CallToolRequest,
   CallToolResult,
-  ServerCapabilities,
   McpServer
+} from './types.js';
+import {
+  ServerCapabilities
 } from './types.js';
 import * as readline from 'readline';
 import WebSocket from 'ws';
@@ -27,7 +29,7 @@ export class WebSocketTransport implements Transport {
       this.ws.on('error', reject);
 
       this.ws.on('message', async (data) => {
-        if (!this.requestHandler) return;
+        if (!this.requestHandler) {return;}
 
         try {
           const request = JSON.parse(data.toString()) as CallToolRequest;
@@ -73,7 +75,7 @@ export class StdioServerTransport implements Transport {
 
   async connect(): Promise<void> {
     this.rl.on('line', async (line) => {
-      if (!this.requestHandler) return;
+      if (!this.requestHandler) {return;}
 
       try {
         const request = JSON.parse(line) as CallToolRequest;
@@ -199,7 +201,7 @@ export class McpServerImpl implements McpServer {
       }
 
       // Extract description if available
-      if (zodDef._def && zodDef._def.description) {
+      if (zodDef._def?.description) {
         description = zodDef._def.description;
       }
 

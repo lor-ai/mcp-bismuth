@@ -12,8 +12,10 @@
     "sourceMap": true,
     "resolveJsonModule": true,
     "rootDir": "src",
-    "lib": ["ES2022"]
+    "lib": ["ES2022"],
+    "isolatedModules": true,
+    "allowSyntheticDefaultImports": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+  "exclude": ["node_modules", "dist"]
 }
