@@ -205,30 +205,28 @@ export class HNSW implements AnnIndex {
       throw new Error('Index not built yet');
     }
     
-    return tf.tidy(() => {
-      // Search from top level down to level 1
-      let candidates = [this.entryPoint!];
-      
-      for (let level = this.maxLevel; level > 0; level--) {
-        candidates = this.searchLevel(query, candidates[0], level, 1);
-      }
-      
-      // Search level 0 with larger ef
-      const finalCandidates = this.searchLevel(query, candidates[0], 0, Math.max(this.efSearch, topK));
-      
-      // Sort by distance and return top K
-      const results = finalCandidates
-        .map(id => ({
-          id,
-          distance: this.computeDistance(query, this.nodes.get(id)!.vector),
-          vector: this.nodes.get(id)!.vector
-        }))
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, topK)
-        .map(result => result.vector.clone());
-      
-      return results;
-    });
+    // Search from top level down to level 1
+    let candidates = [this.entryPoint!];
+    
+    for (let level = this.maxLevel; level > 0; level--) {
+      candidates = this.searchLevel(query, candidates[0], level, 1);
+    }
+    
+    // Search level 0 with larger ef
+    const finalCandidates = this.searchLevel(query, candidates[0], 0, Math.max(this.efSearch, topK));
+    
+    // Sort by distance and return top K
+    const results = finalCandidates
+      .map(id => ({
+        id,
+        distance: this.computeDistance(query, this.nodes.get(id)!.vector),
+        vector: this.nodes.get(id)!.vector
+      }))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, topK)
+      .map(result => result.vector);
+    
+    return results;
   }
 
   needsRebuild(memoryChanged: boolean, slotCount: number): boolean {
@@ -240,7 +238,8 @@ export class HNSW implements AnnIndex {
     
     // Also rebuild if the index size has changed significantly
     const sizeChangeThreshold = 0.1; // 10% change
-    const sizeChanged = Math.abs(slotCount - this.lastSlotCount) / Math.max(this.lastSlotCount, 1) > sizeChangeThreshold;
+    const sizeChanged = this.lastSlotCount > 0 && 
+      Math.abs(slotCount - this.lastSlotCount) / Math.max(this.lastSlotCount, 1) > sizeChangeThreshold;
     
     return shouldRebuild || (this.indexBuilt && sizeChanged);
   }

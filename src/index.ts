@@ -171,41 +171,24 @@ export class TitanMemoryServer {
       }
     );
 
-  // Init model tool
-  this.server.tool(
-    'init_model',
-    "Initialize the Titan Memory model with specified configuration",
-    {
-      inputDim: z.number().int().positive().default(768).describe("Input dimension size"),
-      hiddenDim: z.number().int().positive().default(512).describe("Hidden dimension size"),
-      memoryDim: z.number().int().positive().default(1024).describe("Memory dimension size"),
-      transformerLayers: z.number().int().positive().default(6).describe("Number of transformer layers"),
-      numHeads: z.number().int().positive().default(8).describe("Number of attention heads"),
-      ffDimension: z.number().int().positive().default(2048).describe("Feed-forward dimension"),
-      dropoutRate: z.number().min(0).max(0.9).default(0.1).describe("Dropout rate"),
-      maxSequenceLength: z.number().int().positive().default(512).describe("Maximum sequence length"),
-      memorySlots: z.number().int().positive().default(5000).describe("Number of memory slots"),
-      similarityThreshold: z.number().min(0).max(1).default(0.65).describe("Similarity threshold"),
-      surpriseDecay: z.number().min(0).max(1).default(0.9).describe("Surprise decay rate"),
-      pruningInterval: z.number().int().positive().default(1000).describe("Pruning interval"),
-      gradientClip: z.number().positive().default(1.0).describe("Gradient clipping value")
-    },
-  
-  // Memory stats tool
-  this.server.tool(
-    'memory_stats',
-    "Get current memory statistics",
-    async () => {
-      await this.ensureInitialized();
-      const memoryStats = this.model.get_memory_state();
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(memoryStats, null, 2)
-        }]
-      };
-    }
-  );
+    // Init model tool
+    this.server.tool(
+      'init_model',
+      {
+        inputDim: z.number().int().positive().default(768).describe("Input dimension size"),
+        hiddenDim: z.number().int().positive().default(512).describe("Hidden dimension size"),
+        memoryDim: z.number().int().positive().default(1024).describe("Memory dimension size"),
+        transformerLayers: z.number().int().positive().default(6).describe("Number of transformer layers"),
+        numHeads: z.number().int().positive().default(8).describe("Number of attention heads"),
+        ffDimension: z.number().int().positive().default(2048).describe("Feed-forward dimension"),
+        dropoutRate: z.number().min(0).max(0.9).default(0.1).describe("Dropout rate"),
+        maxSequenceLength: z.number().int().positive().default(512).describe("Maximum sequence length"),
+        memorySlots: z.number().int().positive().default(5000).describe("Number of memory slots"),
+        similarityThreshold: z.number().min(0).max(1).default(0.65).describe("Similarity threshold"),
+        surpriseDecay: z.number().min(0).max(1).default(0.9).describe("Surprise decay rate"),
+        pruningInterval: z.number().int().positive().default(1000).describe("Pruning interval"),
+        gradientClip: z.number().positive().default(1.0).describe("Gradient clipping value")
+      },
       async (params) => {
         try {
           this.model = new TitanMemoryModel();
@@ -244,6 +227,22 @@ export class TitanMemoryServer {
             }]
           };
         }
+      }
+    );
+
+    // Memory stats tool
+    this.server.tool(
+      'memory_stats',
+      {},
+      async () => {
+        await this.ensureInitialized();
+        const memoryStats = this.model.get_memory_state();
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(memoryStats, null, 2)
+          }]
+        };
       }
     );
 

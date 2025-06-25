@@ -4,7 +4,7 @@
  */
 
 import * as tf from '@tensorflow/tfjs-node';
-import type { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, IMemoryModel, ITelemetryData, IHierarchicalMemoryStateInternal, IQuantizedMemoryStateInternal } from './types.js';
+import type { ITensor, IMemoryState, ISurpriseMetrics, IAttentionBlock, IMemoryUpdateResult, IModelGradients, IMemoryModel, ITelemetryData, IHierarchicalMemoryStateInternal, IQuantizedMemoryStateInternal, IMemoryPromotionRules, IRetrievalWeights } from './types.js';
 import { unwrapTensor, wrapTensor, TensorError, MemoryError, type IHierarchicalMemoryState, type IExtendedMemoryState, type IQuantizedMemoryState } from './types.js';
 import * as fs from 'fs/promises';
 import { z } from 'zod';
@@ -322,6 +322,9 @@ export class TitanMemoryModel implements IMemoryModel {
   private advancedTokenizer: AdvancedTokenizer | null = null;
   private vocabSize = 10000;
   private useLegacyCharEncoding = false;
+  
+  // HNSW index for approximate nearest neighbors
+  private hnswIndex: any = null;
 
   private vectorProcessor: VectorProcessor = VectorProcessor.getInstance();
 
@@ -601,18 +604,17 @@ export class TitanMemoryModel implements IMemoryModel {
   /**
    * Retrieves memory based on query
    */
-private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic'): ITensor {
+  private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic' = 'episodic'): ITensor {
     return this.withErrorHandling('retrieveFromMemory', () => {
       const extendedState = this.extendedMemoryState;
       if (!extendedState) throw new MemoryError('Extended memory state not initialized');
 
       const memorySource = type === 'episodic' ? extendedState.episodicMemory : extendedState.semanticMemory;
-      const weightsConfig = type === 'episodic' ? this.retrievalWeights.episodic : this.retrievalWeights.semantic;
-
       // Calculate similarity or recency for retrieval
       let weights: tf.Tensor;
 
       if (type === 'episodic') {
+        const weightsConfig = this.retrievalWeights.episodic;
         const similarities = tf.matMul(memorySource, unwrapTensor(query).reshape([-1, 1]), false, true);
         const recencyScores = tf.sub(tf.scalar(Date.now()), extendedState.episodicTimestamps);
         const weightedSum = tf.add(
@@ -621,6 +623,7 @@ private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic'): ITens
         );
         weights = tf.softmax(weightedSum);
       } else {
+        const weightsConfig = this.retrievalWeights.semantic;
         const similarities = tf.matMul(memorySource, unwrapTensor(query).reshape([-1, 1]), false, true);
         const confidenceScores = extendedState.semanticConfidence;
         const weightedSum = tf.add(
@@ -635,11 +638,11 @@ private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic'): ITens
 
       // Update access counts for memory management
       if (type === 'episodic') {
-        const newAccessCounts = extendedState.episodicAccessCounts.add(weights);
+        const newAccessCounts = extendedState.episodicAccessCounts.add(weights) as tf.Tensor1D;
         tf.dispose(extendedState.episodicAccessCounts);
         extendedState.episodicAccessCounts = newAccessCounts;
       } else {
-        const newAccessCounts = extendedState.semanticAccessCounts.add(weights);
+        const newAccessCounts = extendedState.semanticAccessCounts.add(weights) as tf.Tensor1D;
         tf.dispose(extendedState.semanticAccessCounts);
         extendedState.semanticAccessCounts = newAccessCounts;
       }
@@ -803,7 +806,7 @@ private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic'): ITens
         tf.zeros([workingSlots]),           // Working memory = 0
         tf.ones([shortTermSlots]),          // Short-term memory = 1  
         tf.ones([longTermSlots]).mul(2)     // Long-term memory = 2
-      ]),
+      ]) as tf.Tensor1D,
       
       // Memory types (0=episodic, 1=semantic)
       memoryTypes: tf.concat([
@@ -918,13 +921,59 @@ private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic'): ITens
     if (this.config.useApproximateNearestNeighbors && this.memoryState.shortTerm.shape[0] > 2000) {
       return this.annSearch(queryEmbedding, topK);
     }
-    const queryEmbedding = await this.encodeText(query);
+    
     const similarities = this.calculateSimilarity(queryEmbedding);
-
     const { indices } = tf.topk(similarities, topK);
     return indices.arraySync().map(i =>
       this.memoryState.shortTerm.slice([i, 0], [1, -1]) as tf.Tensor2D
     );
+  }
+
+  /**
+   * Performs approximate nearest neighbor search using HNSW index
+   * @param query The query embedding
+   * @param topK Number of top results to return
+   * @returns Array of similar memory tensors
+   */
+  private async annSearch(query: tf.Tensor1D, topK: number): Promise<tf.Tensor2D[]> {
+    // Import and use the HNSW implementation
+    const { HNSW } = await import('./ann.js');
+    
+    if (!this.hnswIndex) {
+      this.hnswIndex = new HNSW();
+      
+      // Extract memory vectors for indexing
+      const memoryVectors: tf.Tensor[] = [];
+      const numSlots = this.memoryState.shortTerm.shape[0];
+      
+      for (let i = 0; i < numSlots; i++) {
+        const vector = this.memoryState.shortTerm.slice([i, 0], [1, -1]).squeeze() as tf.Tensor1D;
+        memoryVectors.push(vector);
+      }
+      
+      // Build the index
+      await this.hnswIndex.buildIndex(memoryVectors);
+    }
+    
+    // Check if index needs rebuilding
+    if (this.hnswIndex.needsRebuild(true, this.memoryState.shortTerm.shape[0])) {
+      // Rebuild the index
+      const memoryVectors: tf.Tensor[] = [];
+      const numSlots = this.memoryState.shortTerm.shape[0];
+      
+      for (let i = 0; i < numSlots; i++) {
+        const vector = this.memoryState.shortTerm.slice([i, 0], [1, -1]).squeeze() as tf.Tensor1D;
+        memoryVectors.push(vector);
+      }
+      
+      await this.hnswIndex.buildIndex(memoryVectors);
+    }
+    
+    // Perform the search
+    const results = await this.hnswIndex.search(query, topK);
+    
+    // Convert 1D results back to 2D tensors for compatibility
+    return results.map((tensor: tf.Tensor) => tensor.reshape([1, -1]) as tf.Tensor2D);
   }
 
   /**

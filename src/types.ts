@@ -200,6 +200,54 @@ export interface IMemoryModel {
 }
 
 /**
+ * Interface for memory promotion rules between different memory tiers.
+ */
+export interface IMemoryPromotionRules {
+  workingToShortTerm: {
+    accessThreshold: number;
+    timeThreshold: number;
+    importanceThreshold: number;
+  };
+  shortTermToLongTerm: {
+    accessThreshold: number;
+    timeThreshold: number;
+    importanceThreshold: number;
+    reinforcementCount: number;
+  };
+  episodicToSemantic: {
+    generalityThreshold: number;
+    confidenceThreshold: number;
+    abstractionLevel: number;
+  };
+  demotionRules: {
+    lowAccessPenalty: number;
+    ageDecayRate: number;
+    forgettingThreshold: number;
+  };
+}
+
+/**
+ * Interface for retrieval weights in different memory types.
+ */
+export interface IRetrievalWeights {
+  episodic: {
+    recencyWeight: number;
+    contextWeight: number;
+    emotionalWeight: number;
+  };
+  semantic: {
+    similarityWeight: number;
+    confidenceWeight: number;
+    generalityWeight: number;
+  };
+  combined: {
+    episodicBias: number;
+    semanticBias: number;
+    tierPreference: number[];
+  };
+}
+
+/**
  * Interface for server capabilities.
  */
 export interface ServerCapabilities {
