@@ -387,6 +387,14 @@ export class BPETokenizer {
   /**
    * Clean up resources
    */
+  public getMerges(): Array<[string, string]> {
+    return Array.from(this.merges.entries());
+  }
+
+  public getVocab(): Record<string, number> {
+    return Object.fromEntries(this.vocab.entries());
+  }
+
   public dispose(): void {
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);

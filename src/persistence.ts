@@ -2,9 +2,10 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as tf from '@tensorflow/tfjs-node';
-import { TitanMemoryModel, TitanMemoryConfig } from './model';
-import { TitanTokenizer } from './tokenizer';
-import { HNSW } from './ann';
+import { TitanMemoryModel } from './model.js';
+import type { TitanMemoryConfig } from './types.js';
+import { AdvancedTokenizer } from './tokenizer/index.js';
+import { HNSW } from './ann.js';
 
 export interface CheckpointMetadata {
   version: string;
@@ -72,7 +73,7 @@ export class RobustPersistenceManager {
    */
   async saveCheckpoint(
     model: TitanMemoryModel,
-    tokenizer?: TitanTokenizer,
+    tokenizer?: AdvancedTokenizer,
     annIndex?: HNSW,
     metadata?: Partial<CheckpointMetadata>
   ): Promise<string> {
@@ -133,13 +134,13 @@ export class RobustPersistenceManager {
    */
   async loadCheckpoint(
     checkpointPath: string,
-    options: { 
+    options: {
       verifyIntegrity?: boolean;
-      loadComponents?: ('model' | 'tokenizer' | 'annIndex')[];
+      loadComponents?: Array<'model' | 'tokenizer' | 'annIndex'>;
     } = {}
   ): Promise<{
     model: TitanMemoryModel;
-    tokenizer?: TitanTokenizer;
+    tokenizer?: AdvancedTokenizer;
     annIndex?: HNSW;
     metadata: CheckpointMetadata;
   }> {
@@ -148,7 +149,7 @@ export class RobustPersistenceManager {
 
       // Load and validate metadata
       const metadata = await this.loadMetadata(checkpointPath);
-      
+
       if (verifyIntegrity) {
         await this.verifyCheckpointIntegrity(checkpointPath, metadata);
       }
@@ -158,7 +159,7 @@ export class RobustPersistenceManager {
       await this.loadModelComponent(path.dirname(checkpointPath), model, metadata);
 
       // Load optional components
-      let tokenizer: TitanTokenizer | undefined;
+      let tokenizer: AdvancedTokenizer | undefined;
       let annIndex: HNSW | undefined;
 
       if (loadComponents.includes('tokenizer')) {
@@ -182,30 +183,30 @@ export class RobustPersistenceManager {
    */
   async listCheckpoints(modelHash?: string): Promise<CheckpointMetadata[]> {
     const checkpoints: CheckpointMetadata[] = [];
-    
+
     try {
       const baseExists = await this.pathExists(this.baseDir);
       if (!baseExists) {
         return checkpoints;
       }
 
-      const modelDirs = modelHash 
+      const modelDirs = modelHash
         ? [modelHash]
         : await fs.readdir(this.baseDir);
 
       for (const hash of modelDirs) {
         const modelDir = path.join(this.baseDir, hash);
         const modelDirStats = await fs.stat(modelDir).catch(() => null);
-        
-        if (!modelDirStats?.isDirectory()) continue;
+
+        if (!modelDirStats?.isDirectory()) { continue; }
 
         const snapshots = await fs.readdir(modelDir);
         for (const snapshot of snapshots) {
-          if (snapshot === 'latest') continue; // Skip symlink
-          
+          if (snapshot === 'latest') { continue; } // Skip symlink
+
           const snapshotDir = path.join(modelDir, snapshot);
           const checkpointFile = path.join(snapshotDir, 'checkpoint.json');
-          
+
           try {
             const metadata = await this.loadMetadata(checkpointFile);
             checkpoints.push(metadata);
@@ -216,7 +217,7 @@ export class RobustPersistenceManager {
       }
 
       // Sort by creation date (newest first)
-      return checkpoints.sort((a, b) => 
+      return checkpoints.sort((a, b) =>
         new Date(b.created).getTime() - new Date(a.created).getTime()
       );
     } catch (error) {
@@ -230,7 +231,7 @@ export class RobustPersistenceManager {
    */
   async getLatestCheckpoint(modelHash: string): Promise<string | null> {
     const latestPath = path.join(this.baseDir, modelHash, 'latest');
-    
+
     try {
       const stats = await fs.lstat(latestPath);
       if (stats.isSymbolicLink()) {
@@ -241,7 +242,7 @@ export class RobustPersistenceManager {
     } catch (error) {
       // No latest symlink exists
     }
-    
+
     return null;
   }
 
@@ -276,7 +277,7 @@ export class RobustPersistenceManager {
 
       const validSnapshots = snapshotMetadata
         .filter(snapshot => snapshot !== null)
-        .sort((a, b) => b!.created.getTime() - a!.created.getTime());
+        .sort((a, b) => b.created.getTime() - a.created.getTime());
 
       let snapshotsToDelete: typeof validSnapshots = [];
 
@@ -286,17 +287,17 @@ export class RobustPersistenceManager {
             snapshotsToDelete = validSnapshots.slice(maxSnapshots);
           }
           break;
-          
+
         case 'time':
           const cutoffDate = new Date(Date.now() - retentionValue * 24 * 60 * 60 * 1000);
-          snapshotsToDelete = validSnapshots.filter(s => s!.created < cutoffDate);
+          snapshotsToDelete = validSnapshots.filter(s => s.created < cutoffDate);
           break;
-          
+
         case 'size':
           let totalSize = 0;
           const maxSizeBytes = retentionValue * 1024 * 1024; // Convert MB to bytes
           for (const snapshot of validSnapshots) {
-            totalSize += snapshot!.metadata.size.total;
+            totalSize += snapshot.metadata.size.total;
             if (totalSize > maxSizeBytes && validSnapshots.indexOf(snapshot) > 0) {
               snapshotsToDelete = validSnapshots.slice(validSnapshots.indexOf(snapshot));
               break;
@@ -366,7 +367,7 @@ export class RobustPersistenceManager {
   private async saveAllComponents(
     snapshotDir: string,
     model: TitanMemoryModel,
-    tokenizer?: TitanTokenizer,
+    tokenizer?: AdvancedTokenizer,
     annIndex?: HNSW
   ): Promise<CheckpointMetadata['files']> {
     const files: CheckpointMetadata['files'] = {
@@ -387,15 +388,16 @@ export class RobustPersistenceManager {
     await model.save(`file://${weightsDir}`);
 
     // Save memory state
-    if (model['memoryState']) {
+    const memorySnapshot = model.getMemorySnapshot();
+    if (memorySnapshot) {
       files.memoryState = 'memoryState.json';
       const memoryData = {
-        shortTerm: await model['memoryState'].shortTerm.array(),
-        longTerm: await model['memoryState'].longTerm.array(),
-        meta: await model['memoryState'].meta.array(),
-        timestamps: Array.from(await model['memoryState'].timestamps.data()),
-        accessCounts: Array.from(await model['memoryState'].accessCounts.data()),
-        surpriseHistory: Array.from(await model['memoryState'].surpriseHistory.data())
+        shortTerm: await memorySnapshot.shortTerm.array(),
+        longTerm: await memorySnapshot.longTerm.array(),
+        meta: await memorySnapshot.meta.array(),
+        timestamps: Array.from(await memorySnapshot.timestamps.data()),
+        accessCounts: Array.from(await memorySnapshot.accessCounts.data()),
+        surpriseHistory: Array.from(await memorySnapshot.surpriseHistory.data())
       };
       await fs.writeFile(
         path.join(snapshotDir, files.memoryState),
@@ -406,16 +408,16 @@ export class RobustPersistenceManager {
     // Save tokenizer data
     if (tokenizer) {
       const tokenizerData = {
-        merges: tokenizer.getBPETokenizer()['merges'] || [],
-        vocab: tokenizer.getBPETokenizer()['vocab'] || {},
-        config: tokenizer['config'] || {},
+        merges: tokenizer.getBPETokenizer().getMerges() || [],
+        vocab: tokenizer.getBPETokenizer().getVocab() || {},
+        config: tokenizer.getConfig() || {},
         stats: tokenizer.getStats()
       };
       await fs.writeFile(
         path.join(snapshotDir, files.tokenizerMerges),
         JSON.stringify(tokenizerData, null, 2)
       );
-      
+
       // Save tokenizer weights if embedding is available
       try {
         const embeddingDir = path.join(snapshotDir, 'tokenizer_weights');
@@ -435,14 +437,9 @@ export class RobustPersistenceManager {
     if (annIndex) {
       const annData = {
         type: 'HNSW',
-        built: annIndex['indexBuilt'] || false,
+        built: annIndex.isIndexBuilt || false,
         nodes: await this.serializeHNSWNodes(annIndex),
-        parameters: {
-          maxConnections: annIndex['maxConnections'],
-          maxConnectionsLevel0: annIndex['maxConnectionsLevel0'],
-          efConstruction: annIndex['efConstruction'],
-          efSearch: annIndex['efSearch']
-        }
+        parameters: annIndex.getParameters()
       };
       await fs.writeFile(
         path.join(snapshotDir, files.annIndex),
@@ -466,60 +463,45 @@ export class RobustPersistenceManager {
     // Load configuration
     const configPath = path.join(snapshotDir, metadata.files.modelConfig);
     const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
-    
+
     // Initialize model with config
     await model.initialize(config);
-    
+
     // Load weights
     const weightsPath = path.join(snapshotDir, metadata.files.weights);
     await model.load(`file://${weightsPath}`);
-    
+
     // Load memory state if available
     if (metadata.files.memoryState) {
       const memoryStatePath = path.join(snapshotDir, metadata.files.memoryState);
       const memoryData = JSON.parse(await fs.readFile(memoryStatePath, 'utf-8'));
-      
-      // Recreate memory state tensors
-      if (model['memoryState']) {
-        Object.values(model['memoryState']).forEach(tensor => {
-          if (tensor && !tensor.isDisposed) {
-            tensor.dispose();
-          }
-        });
-      }
-      
-      model['memoryState'] = {
-        shortTerm: tf.tensor(memoryData.shortTerm),
-        longTerm: tf.tensor(memoryData.longTerm),
-        meta: tf.tensor(memoryData.meta),
-        timestamps: tf.tensor1d(memoryData.timestamps),
-        accessCounts: tf.tensor1d(memoryData.accessCounts),
-        surpriseHistory: tf.tensor1d(memoryData.surpriseHistory)
-      };
+
+      // Restore memory state using public method
+      model.restoreMemoryState(memoryData);
     }
   }
 
   /**
    * Load tokenizer component
    */
-  private async loadTokenizerComponent(snapshotDir: string, metadata: CheckpointMetadata): Promise<TitanTokenizer | undefined> {
+  private async loadTokenizerComponent(snapshotDir: string, metadata: CheckpointMetadata): Promise<AdvancedTokenizer | undefined> {
     try {
       const tokenizerPath = path.join(snapshotDir, metadata.files.tokenizerMerges);
       const tokenizerData = JSON.parse(await fs.readFile(tokenizerPath, 'utf-8'));
-      
+
       if (tokenizerData.metadata?.placeholder) {
         return undefined;
       }
-      
-      const tokenizer = new TitanTokenizer(tokenizerData.config || {});
+
+      const tokenizer = new AdvancedTokenizer(tokenizerData.config || {});
       await tokenizer.initialize();
-      
+
       // Load tokenizer weights if available
       const weightsDir = path.join(snapshotDir, 'tokenizer_weights');
       if (await this.pathExists(weightsDir)) {
         await tokenizer.load(weightsDir);
       }
-      
+
       return tokenizer;
     } catch (error) {
       console.warn('Could not load tokenizer component:', error);
@@ -534,14 +516,14 @@ export class RobustPersistenceManager {
     try {
       const annPath = path.join(snapshotDir, metadata.files.annIndex);
       const annData = JSON.parse(await fs.readFile(annPath, 'utf-8'));
-      
+
       if (annData.metadata?.placeholder || !annData.built) {
         return undefined;
       }
-      
+
       const annIndex = new HNSW();
       await this.deserializeHNSWNodes(annIndex, annData);
-      
+
       return annIndex;
     } catch (error) {
       console.warn('Could not load ANN index component:', error);
@@ -554,12 +536,12 @@ export class RobustPersistenceManager {
    */
   private generateModelHash(config: TitanMemoryConfig): string {
     const hashableConfig = {
-      inputSize: config.inputSize,
-      hiddenSize: config.hiddenSize,
+      inputDim: config.inputDim,
+      hiddenDim: config.hiddenDim,
       memorySlots: config.memorySlots,
-      architecture: config.architecture || 'default'
+      transformerLayers: config.transformerLayers
     };
-    
+
     const hash = crypto.createHash('sha256');
     hash.update(JSON.stringify(hashableConfig));
     return hash.digest('hex').substring(0, 16);
@@ -588,14 +570,14 @@ export class RobustPersistenceManager {
   private async updateLatestSymlink(modelHash: string, snapshotId: string): Promise<void> {
     const modelDir = path.join(this.baseDir, modelHash);
     const latestPath = path.join(modelDir, 'latest');
-    
+
     // Remove existing symlink
     try {
       await fs.unlink(latestPath);
     } catch {
       // Symlink doesn't exist, that's ok
     }
-    
+
     // Create new symlink
     await fs.symlink(snapshotId, latestPath);
   }
@@ -605,14 +587,14 @@ export class RobustPersistenceManager {
    */
   private async calculateDirectorySize(dirPath: string): Promise<{ total: number }> {
     let total = 0;
-    
+
     const walk = async (currentPath: string): Promise<void> => {
       const items = await fs.readdir(currentPath);
-      
+
       for (const item of items) {
         const itemPath = path.join(currentPath, item);
         const stats = await fs.stat(itemPath);
-        
+
         if (stats.isDirectory()) {
           await walk(itemPath);
         } else {
@@ -620,7 +602,7 @@ export class RobustPersistenceManager {
         }
       }
     };
-    
+
     await walk(dirPath);
     return { total };
   }
@@ -630,7 +612,7 @@ export class RobustPersistenceManager {
    */
   private async generateIntegrityData(snapshotDir: string, files: CheckpointMetadata['files']): Promise<CheckpointMetadata['integrity']> {
     const checksums: Record<string, string> = {};
-    
+
     for (const [component, filename] of Object.entries(files)) {
       if (filename) {
         const filePath = path.join(snapshotDir, filename);
@@ -639,7 +621,7 @@ export class RobustPersistenceManager {
         }
       }
     }
-    
+
     return {
       checksums,
       verified: true
@@ -651,22 +633,22 @@ export class RobustPersistenceManager {
    */
   private async calculateFileChecksum(filePath: string): Promise<string> {
     const stats = await fs.stat(filePath);
-    
+
     if (stats.isDirectory()) {
       // For directories, calculate checksum of all contained files
       const hash = crypto.createHash('sha256');
       const items = await fs.readdir(filePath);
-      
+
       for (const item of items.sort()) {
         const itemPath = path.join(filePath, item);
         const itemStats = await fs.stat(itemPath);
-        
+
         if (itemStats.isFile()) {
           const content = await fs.readFile(itemPath);
           hash.update(content);
         }
       }
-      
+
       return hash.digest('hex');
     } else {
       const content = await fs.readFile(filePath);
@@ -706,9 +688,9 @@ export class RobustPersistenceManager {
    */
   private async serializeHNSWNodes(annIndex: HNSW): Promise<any[]> {
     // This is a simplified serialization - in practice you'd need to handle tensor serialization
-    const nodes = annIndex['nodes'] || new Map();
+    const nodes = annIndex.hnswNodes || new Map();
     const serialized = [];
-    
+
     for (const [id, node] of nodes.entries()) {
       serialized.push({
         id,
@@ -716,7 +698,7 @@ export class RobustPersistenceManager {
         connections: Object.fromEntries(node.connections)
       });
     }
-    
+
     return serialized;
   }
 
@@ -726,28 +708,24 @@ export class RobustPersistenceManager {
   private async deserializeHNSWNodes(annIndex: HNSW, data: any): Promise<void> {
     // This is a simplified deserialization - in practice you'd need to handle tensor deserialization
     const nodes = new Map();
-    
+
     for (const nodeData of data.nodes) {
       const connections = new Map();
       for (const [level, connectionSet] of Object.entries(nodeData.connections)) {
         connections.set(parseInt(level), new Set(connectionSet as number[]));
       }
-      
+
       nodes.set(nodeData.id, {
         id: nodeData.id,
         vector: tf.tensor(nodeData.vector),
         connections
       });
     }
-    
-    annIndex['nodes'] = nodes;
-    annIndex['indexBuilt'] = data.built;
-    
+
+    annIndex.restoreState(nodes, data.built);
+
     if (data.parameters) {
-      annIndex['maxConnections'] = data.parameters.maxConnections;
-      annIndex['maxConnectionsLevel0'] = data.parameters.maxConnectionsLevel0;
-      annIndex['efConstruction'] = data.parameters.efConstruction;
-      annIndex['efSearch'] = data.parameters.efSearch;
+      annIndex.setParameters(data.parameters);
     }
   }
 }

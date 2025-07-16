@@ -1,0 +1,11 @@
+{
+    "mcpServers": {
+        "titan-memory": {
+            "command": "node",
+            "args": [
+                "index.js"
+            ],
+            "cwd": "/Users/henrymayo/Desktop/mcp-titan"
+        }
+    }
+}

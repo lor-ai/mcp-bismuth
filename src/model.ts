@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { VectorProcessor, SafeTensorOps } from './utils.js';
 import { AdvancedTokenizer, type TokenizerConfig } from './tokenizer/index.js';
 import { MemoryPruner, type PruningConfig, type PruningResult, createDefaultPruningConfig } from './pruning.js';
-import { TfIdfVectorizer } from './tfidf.js';
+import type { TfIdfVectorizer } from './tfidf.js';
 
 // Add telemetry implementation
 class ModelTelemetry {
@@ -198,7 +198,7 @@ const ModelConfigSchema = z.object({
   contrastiveWeight: z.number().min(0).max(1).default(0.1)
 });
 
-type TitanMemoryConfig = z.infer<typeof ModelConfigSchema>;
+export type TitanMemoryConfig = z.infer<typeof ModelConfigSchema>;
 
 interface WeightInfo {
   shape: number[];
@@ -247,7 +247,7 @@ export class TitanMemoryModel implements IMemoryModel {
 
   // Extended memory state with hierarchical tiers and episodic/semantic distinction
   private extendedMemoryState: IExtendedMemoryState | null = null;
-  
+
   // Memory promotion/demotion rules
   private promotionRules: IMemoryPromotionRules = {
     workingToShortTerm: {
@@ -272,7 +272,7 @@ export class TitanMemoryModel implements IMemoryModel {
       forgettingThreshold: 0.1
     }
   };
-  
+
   // Retrieval weights for different memory types
   private retrievalWeights: IRetrievalWeights = {
     episodic: {
@@ -291,17 +291,17 @@ export class TitanMemoryModel implements IMemoryModel {
       tierPreference: [0.8, 0.6, 0.4] // working, short-term, long-term
     }
   };
-  
+
   // Memory statistics tracking
   private memoryStats: {
     promotions: { recent: number; total: number };
     demotions: { recent: number; total: number };
     lastStatsUpdate: number;
   } = {
-    promotions: { recent: 0, total: 0 },
-    demotions: { recent: 0, total: 0 },
-    lastStatsUpdate: Date.now()
-  };
+      promotions: { recent: 0, total: 0 },
+      demotions: { recent: 0, total: 0 },
+      lastStatsUpdate: Date.now()
+    };
 
   // Add hierarchical memory properties
   private hierarchicalLevels = 3;
@@ -324,15 +324,15 @@ export class TitanMemoryModel implements IMemoryModel {
   private advancedTokenizer: AdvancedTokenizer | null = null;
   private vocabSize = 10000;
   private useLegacyCharEncoding = false;
-  
+
   // HNSW index for approximate nearest neighbors
   private hnswIndex: any = null;
 
   private vectorProcessor: VectorProcessor = VectorProcessor.getInstance();
-  
+
   // Memory pruning system
   private memoryPruner: MemoryPruner;
-  
+
   // TF-IDF fallback for untrained encoder
   private tfidfVectorizer: TfIdfVectorizer | null = null;
   private fallbackDocuments: string[] = [];
@@ -373,7 +373,7 @@ export class TitanMemoryModel implements IMemoryModel {
   constructor(config?: Partial<TitanMemoryConfig>) {
     // Initialize with empty config first
     this.config = ModelConfigSchema.parse(config || {});
-    
+
     // Initialize memory pruner with configuration
     this.memoryPruner = new MemoryPruner({
       keepPercentage: 0.7,
@@ -384,7 +384,7 @@ export class TitanMemoryModel implements IMemoryModel {
       redundancyWeight: 0.8,
       enableDistillation: true
     });
-    
+
     // Initialize tokenizer based on configuration (async, will be handled during initialize())
     this.initializeTokenizer().catch(error => {
       console.warn('Failed to initialize tokenizer in constructor:', error);
@@ -407,7 +407,7 @@ export class TitanMemoryModel implements IMemoryModel {
     };
 
     this.advancedTokenizer = new AdvancedTokenizer(tokenizerConfig);
-    
+
     // Initialize the advanced tokenizer
     try {
       await this.advancedTokenizer.initialize();
@@ -417,7 +417,7 @@ export class TitanMemoryModel implements IMemoryModel {
       this.useLegacyCharEncoding = true;
       this.advancedTokenizer.setLegacyMode(true);
     }
-    
+
     // Keep legacy tokenizer for backward compatibility
     this.tokenizer = {
       encode: (text: string) => Array.from(text).map(c => c.charCodeAt(0) % this.vocabSize),
@@ -554,14 +554,14 @@ export class TitanMemoryModel implements IMemoryModel {
             padding: true,
             truncation: true
           });
-          
+
           // Convert 2D embeddings to 1D by taking mean across sequence dimension
-          const flattened = tf.mean(tokenizationResult.embeddings, 0) as tf.Tensor1D;
-          
+          const flattened = tf.mean(tokenizationResult.embeddings, 0);
+
           // Dispose of intermediate tensors
           tokenizationResult.embeddings.dispose();
           tokenizationResult.attentionMask.dispose();
-          
+
           return flattened;
         } catch (error) {
           console.warn('Advanced tokenizer failed, falling back to legacy mode:', error);
@@ -571,40 +571,40 @@ export class TitanMemoryModel implements IMemoryModel {
           }
         }
       }
-      
+
       // TF-IDF fallback if encoder is untrained or vectorProcessor unavailable
       if (this.tfidfVectorizer && this.fallbackDocuments.length > 0) {
         try {
           const tfidfVector = this.tfidfVectorizer.transform([text]);
           const vectorArray = await tfidfVector.data();
-          
+
           // Pad or truncate to match config.maxSequenceLength
           const targetLength = this.config.maxSequenceLength;
           const resultArray = new Float32Array(targetLength);
           const copyLength = Math.min(vectorArray.length, targetLength);
-          
+
           for (let i = 0; i < copyLength; i++) {
             resultArray[i] = vectorArray[i];
           }
-          
+
           tfidfVector.dispose();
           return tf.tensor1d(resultArray);
         } catch (error) {
           console.warn('TF-IDF fallback failed:', error);
         }
       }
-      
+
       // Fallback to VectorProcessor or legacy character encoding
       if (this.vectorProcessor) {
         const tokenData = this.vectorProcessor.encodeText(text);
         let result: tf.Tensor1D;
-        
+
         if (tokenData instanceof Promise) {
           result = (await tokenData) as tf.Tensor1D;
         } else {
           result = tokenData as tf.Tensor1D;
         }
-        
+
         if (result.shape.length !== 1) {
           throw new Error('Encoded tensor has unexpected shape');
         }
@@ -650,7 +650,7 @@ export class TitanMemoryModel implements IMemoryModel {
   private retrieveFromMemory(query: ITensor, type: 'episodic' | 'semantic' = 'episodic'): ITensor {
     return this.withErrorHandling('retrieveFromMemory', () => {
       const extendedState = this.extendedMemoryState;
-      if (!extendedState) throw new MemoryError('Extended memory state not initialized');
+      if (!extendedState) { throw new MemoryError('Extended memory state not initialized'); }
 
       const memorySource = type === 'episodic' ? extendedState.episodicMemory : extendedState.semanticMemory;
       // Calculate similarity or recency for retrieval
@@ -681,11 +681,11 @@ export class TitanMemoryModel implements IMemoryModel {
 
       // Update access counts for memory management
       if (type === 'episodic') {
-        const newAccessCounts = extendedState.episodicAccessCounts.add(weights) as tf.Tensor1D;
+        const newAccessCounts = extendedState.episodicAccessCounts.add(weights);
         tf.dispose(extendedState.episodicAccessCounts);
         extendedState.episodicAccessCounts = newAccessCounts;
       } else {
-        const newAccessCounts = extendedState.semanticAccessCounts.add(weights) as tf.Tensor1D;
+        const newAccessCounts = extendedState.semanticAccessCounts.add(weights);
         tf.dispose(extendedState.semanticAccessCounts);
         extendedState.semanticAccessCounts = newAccessCounts;
       }
@@ -807,50 +807,50 @@ export class TitanMemoryModel implements IMemoryModel {
     const workingSlots = Math.floor(memorySlots * 0.4);
     const shortTermSlots = Math.floor(memorySlots * 0.35);
     const longTermSlots = memorySlots - workingSlots - shortTermSlots;
-    
+
     // Type distribution: 60% episodic, 40% semantic
     const episodicSlots = Math.floor(memorySlots * 0.6);
     const semanticSlots = memorySlots - episodicSlots;
 
     this.extendedMemoryState = {
       ...this.memoryState,
-      
+
       // Hierarchical memory tiers
       workingMemory: tf.zeros([workingSlots, embeddingSize]),
       shortTermMemory: tf.zeros([shortTermSlots, embeddingSize]),
       longTermMemory: tf.zeros([longTermSlots, embeddingSize]),
-      
+
       // Episodic vs Semantic distinction
       episodicMemory: tf.zeros([episodicSlots, embeddingSize]),
       semanticMemory: tf.zeros([semanticSlots, embeddingSize]),
-      
+
       // Temporal information
       workingTimestamps: tf.fill([workingSlots], currentTime),
       shortTermTimestamps: tf.fill([shortTermSlots], currentTime),
       longTermTimestamps: tf.fill([longTermSlots], currentTime),
       episodicTimestamps: tf.fill([episodicSlots], currentTime),
       semanticTimestamps: tf.fill([semanticSlots], currentTime),
-      
+
       // Access patterns
       workingAccessCounts: tf.zeros([workingSlots]),
       shortTermAccessCounts: tf.zeros([shortTermSlots]),
       longTermAccessCounts: tf.zeros([longTermSlots]),
       episodicAccessCounts: tf.zeros([episodicSlots]),
       semanticAccessCounts: tf.zeros([semanticSlots]),
-      
+
       // Memory quality metrics
       episodicRecency: tf.ones([episodicSlots]), // Start with neutral recency
       semanticConfidence: tf.ones([semanticSlots]).mul(0.5), // Start with medium confidence
       memoryImportance: tf.ones([memorySlots]).mul(0.5), // Start with medium importance
       surpriseScores: tf.zeros([memorySlots]),
-      
+
       // Memory classification (0=working, 1=short-term, 2=long-term)
       memoryTiers: tf.concat([
         tf.zeros([workingSlots]),           // Working memory = 0
         tf.ones([shortTermSlots]),          // Short-term memory = 1  
         tf.ones([longTermSlots]).mul(2)     // Long-term memory = 2
       ]) as tf.Tensor1D,
-      
+
       // Memory types (0=episodic, 1=semantic)
       memoryTypes: tf.concat([
         tf.zeros([episodicSlots]),          // Episodic = 0
@@ -964,7 +964,7 @@ export class TitanMemoryModel implements IMemoryModel {
     if (this.config.useApproximateNearestNeighbors && this.memoryState.shortTerm.shape[0] > 2000) {
       return this.annSearch(queryEmbedding, topK);
     }
-    
+
     const similarities = this.calculateSimilarity(queryEmbedding);
     const { indices } = tf.topk(similarities, topK);
     return indices.arraySync().map(i =>
@@ -981,42 +981,42 @@ export class TitanMemoryModel implements IMemoryModel {
   private async annSearch(query: tf.Tensor1D, topK: number): Promise<tf.Tensor2D[]> {
     // Import and use the HNSW implementation
     const { HNSW } = await import('./ann.js');
-    
+
     if (!this.hnswIndex) {
       this.hnswIndex = new HNSW();
-      
+
       // Extract memory vectors for indexing
       const memoryVectors: tf.Tensor[] = [];
       const numSlots = this.memoryState.shortTerm.shape[0];
-      
+
       for (let i = 0; i < numSlots; i++) {
-        const vector = this.memoryState.shortTerm.slice([i, 0], [1, -1]).squeeze() as tf.Tensor1D;
+        const vector = this.memoryState.shortTerm.slice([i, 0], [1, -1]).squeeze();
         memoryVectors.push(vector);
       }
-      
+
       // Build the index
       await this.hnswIndex.buildIndex(memoryVectors);
     }
-    
+
     // Check if index needs rebuilding
     if (this.hnswIndex.needsRebuild(true, this.memoryState.shortTerm.shape[0])) {
       // Rebuild the index
       const memoryVectors: tf.Tensor[] = [];
       const numSlots = this.memoryState.shortTerm.shape[0];
-      
+
       for (let i = 0; i < numSlots; i++) {
-        const vector = this.memoryState.shortTerm.slice([i, 0], [1, -1]).squeeze() as tf.Tensor1D;
+        const vector = this.memoryState.shortTerm.slice([i, 0], [1, -1]).squeeze();
         memoryVectors.push(vector);
       }
-      
+
       await this.hnswIndex.buildIndex(memoryVectors);
     }
-    
+
     // Perform the search
     const results = await this.hnswIndex.search(query, topK);
-    
+
     // Convert 1D results back to 2D tensors for compatibility
-    return results.map((tensor: tf.Tensor) => tensor.reshape([1, -1]) as tf.Tensor2D);
+    return results.map((tensor: tf.Tensor) => tensor.reshape([1, -1]));
   }
 
   /**
@@ -1688,6 +1688,27 @@ export class TitanMemoryModel implements IMemoryModel {
       timestamps: this.memoryState.timestamps.clone(),
       accessCounts: this.memoryState.accessCounts.clone(),
       surpriseHistory: this.memoryState.surpriseHistory.clone()
+    };
+  }
+
+  public restoreMemoryState(memoryData: any): void {
+    // Dispose existing memory state
+    if (this.memoryState) {
+      Object.values(this.memoryState).forEach((tensor: any) => {
+        if (tensor && typeof tensor.dispose === 'function' && !tensor.isDisposed) {
+          tensor.dispose();
+        }
+      });
+    }
+
+    // Restore memory state from data
+    this.memoryState = {
+      shortTerm: tf.tensor(memoryData.shortTerm),
+      longTerm: tf.tensor(memoryData.longTerm),
+      meta: tf.tensor(memoryData.meta),
+      timestamps: tf.tensor1d(memoryData.timestamps),
+      accessCounts: tf.tensor1d(memoryData.accessCounts),
+      surpriseHistory: tf.tensor1d(memoryData.surpriseHistory)
     };
   }
 
@@ -3000,7 +3021,7 @@ export class TitanMemoryModel implements IMemoryModel {
       if (threshold !== undefined) {
         this.memoryPruner.updateConfig({ keepPercentage: threshold });
       }
-      
+
       // Check if pruning is needed
       if (!this.memoryPruner.shouldPrune(this.memoryState)) {
         return {
@@ -3012,29 +3033,29 @@ export class TitanMemoryModel implements IMemoryModel {
           newMemoryState: this.memoryState
         };
       }
-      
+
       // Perform pruning
       const result = await this.memoryPruner.pruneMemory(this.memoryState);
-      
+
       // Validate the pruned state
       if (!this.memoryPruner.validatePrunedState(result.newMemoryState)) {
         throw new MemoryError('Pruned memory state failed validation');
       }
-      
+
       // Update the model's memory state
       this.memoryState = result.newMemoryState;
-      
+
       // Log pruning statistics
       const stats = this.memoryPruner.getPruningStats();
       console.log(`Memory pruned: ${result.originalCount} -> ${result.finalCount} slots (${(result.reductionRatio * 100).toFixed(1)}% reduction)`);
       console.log(`Distilled ${result.distilledCount} memories into long-term storage`);
       console.log(`Average score of kept memories: ${result.averageScore.toFixed(4)}`);
       console.log(`Total pruning operations: ${stats.totalPrunings}`);
-      
+
       return result;
     });
   }
-  
+
   /**
    * Get the current number of active memories
    */
@@ -3045,7 +3066,7 @@ export class TitanMemoryModel implements IMemoryModel {
       return tf.sum(tf.cast(nonZeroMask, 'int32')).dataSync()[0];
     });
   }
-  
+
   /**
    * Get memory pruning statistics
    */
@@ -3060,7 +3081,7 @@ export class TitanMemoryModel implements IMemoryModel {
   } {
     const prunerStats = this.memoryPruner.getPruningStats();
     const currentSize = this.getMemorySize();
-    
+
     return {
       ...prunerStats,
       shouldPrune: this.memoryPruner.shouldPrune(this.memoryState),

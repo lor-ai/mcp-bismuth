@@ -14,21 +14,21 @@ export interface TokenizerConfig {
   mergesFile?: string;
   specialTokens?: string[];
   useCharFallback?: boolean;
-  
+
   // Embedding configuration
   embeddingDim?: number;
   paddingIdx?: number;
   maxNorm?: number;
-  
+
   // MLM configuration
   hiddenSize?: number;
   maskProbability?: number;
   maxSequenceLength?: number;
   labelSmoothingEpsilon?: number;
-  
+
   // Backward compatibility
   useLegacyCharMode?: boolean;
-  
+
   // Learning
   enableBootstrapping?: boolean;
   maxMergesPerText?: number;
@@ -113,7 +113,7 @@ export class AdvancedTokenizer {
    */
   public async initialize(): Promise<void> {
     await this.bpeTokenizer.loadMerges();
-    
+
     // Initialize MLM head if needed
     if (this.config.hiddenSize) {
       const mlmConfig: MLMConfig = {
@@ -168,7 +168,7 @@ export class AdvancedTokenizer {
     // Tokenize with BPE
     let tokenIds = this.bpeTokenizer.encode(text);
     const originalLength = tokenIds.length;
-    
+
     // Add special tokens
     if (addSpecialTokens) {
       const clsId = this.bpeTokenizer.getSpecialTokenId('CLS');
@@ -177,7 +177,7 @@ export class AdvancedTokenizer {
     }
 
     let truncated = false;
-    
+
     // Handle truncation
     if (truncation && tokenIds.length > maxLength) {
       if (addSpecialTokens) {
@@ -192,7 +192,7 @@ export class AdvancedTokenizer {
     // Handle padding
     const padId = this.bpeTokenizer.getSpecialTokenId('PAD');
     const attentionMask: number[] = [];
-    
+
     for (let i = 0; i < tokenIds.length; i++) {
       attentionMask.push(tokenIds[i] === padId ? 0 : 1);
     }
@@ -210,7 +210,7 @@ export class AdvancedTokenizer {
 
     return {
       tokenIds,
-      embeddings: embeddings as tf.Tensor2D,
+      embeddings: embeddings,
       attentionMask: attentionMaskTensor,
       metadata: {
         originalLength,
@@ -226,15 +226,15 @@ export class AdvancedTokenizer {
    */
   private async encodeLegacyChar(text: string, maxLength: number): Promise<TokenizationResult> {
     const charCodes = text.split('').map(char => char.charCodeAt(0) % 256);
-    let tokenIds = charCodes.slice(0, maxLength);
-    
+    const tokenIds = charCodes.slice(0, maxLength);
+
     // Pad to maxLength
     while (tokenIds.length < maxLength) {
       tokenIds.push(0);
     }
 
     const attentionMask = tokenIds.map(id => id === 0 ? 0 : 1);
-    
+
     // Create simple embeddings for character mode
     const embeddings = tf.randomNormal([tokenIds.length, this.config.embeddingDim!]) as tf.Tensor2D;
     const attentionMaskTensor = tf.tensor1d(attentionMask, 'float32');
@@ -256,11 +256,11 @@ export class AdvancedTokenizer {
    * Bootstrap BPE learning from incoming text
    */
   private async bootstrapFromText(text: string): Promise<void> {
-    if (text.length < 50) return; // Skip very short texts
-    
+    if (text.length < 50) { return; } // Skip very short texts
+
     try {
       await this.bpeTokenizer.learnFromText(text, this.config.maxMergesPerText);
-      
+
       // Update vocabulary size in embedding if needed
       const newVocabSize = this.bpeTokenizer.getVocabSize();
       if (newVocabSize !== this.embedding.getConfig().vocabSize) {
@@ -305,7 +305,7 @@ export class AdvancedTokenizer {
 
     // Get MLM batch
     const mlmBatch = await this.mlmHead.prepareBatch(texts, maxLength);
-    
+
     // Get embeddings for the inputs
     const embeddings = this.embedding.forward(mlmBatch.inputIds) as tf.Tensor3D;
 
@@ -369,10 +369,10 @@ export class AdvancedTokenizer {
    */
   public async save(directory: string): Promise<void> {
     // BPE merges are automatically saved
-    
+
     // Save embedding weights
     await this.embedding.saveWeights(`${directory}/embedding_weights`);
-    
+
     // Save MLM weights if present
     if (this.mlmHead) {
       const mlmWeights = this.mlmHead.getWeights();
@@ -385,7 +385,7 @@ export class AdvancedTokenizer {
           })
         ]
       });
-      
+
       await model.save(`file://${directory}/mlm_model`);
       model.dispose();
     }
@@ -401,7 +401,7 @@ export class AdvancedTokenizer {
     try {
       // Load embedding weights
       await this.embedding.loadWeights(`${directory}/embedding_weights`);
-      
+
       // Load MLM weights if present
       if (this.mlmHead) {
         // This is simplified - in practice you'd save/load the full model
@@ -447,6 +447,10 @@ export class AdvancedTokenizer {
   /**
    * Dispose of resources
    */
+  public getConfig(): TokenizerConfig {
+    return this.config;
+  }
+
   public dispose(): void {
     this.bpeTokenizer.dispose();
     this.embedding.dispose();

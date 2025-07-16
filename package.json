@@ -1,5 +1,5 @@
 {
-  "name": "titan-memory-mcp",
+  "name": "@henryhayo/titan-mcp",
   "version": "2.0.0",
   "description": "A neural memory system for LLMs that can learn and predict sequences while maintaining state",
   "main": "dist/index.js",
@@ -12,6 +12,11 @@
     "start": "node index.js",
     "dev": "tsc -w & nodemon index.js",
     "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "train-model": "npm run build && node dist/scripts/train-model.js",
+    "train-quick": "npm run build && node dist/scripts/train-model.js --quick",
+    "train-production": "npm run build && node dist/scripts/train-model.js --production",
+    "download-data": "npm run build && node dist/scripts/download-data.js",
+    "test-model": "npm run build && node dist/scripts/test-model.js",
     "lint": "eslint . --max-warnings 0 --report-unused-disable-directives",
     "lint:fix": "eslint . --fix --max-warnings 0 --report-unused-disable-directives",
     "format": "prettier --write \"src/**/*.{ts,js,json}\"",
@@ -19,6 +24,11 @@
     "typecheck": "tsc --noEmit",
     "clean": "rimraf dist"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "private": false,
   "keywords": [
     "mcp",
     "memory",

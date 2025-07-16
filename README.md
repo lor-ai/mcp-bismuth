@@ -60,6 +60,25 @@ The server will start and listen for MCP tool requests. By default, it runs on p
 ### 5. Integrate with Cursor or Claude
 
 - **Cursor**: Ensure MCP is enabled in Cursor settings. Cursor will auto-detect and connect to the running MCP server.
+
+    "titan-memory": {
+      "command": "node",
+      "args": ["index.js"],
+      "cwd": "/Users/henrymayo/Desktop/mcp-titan",
+      "autoapprove": [
+        "create_entities",
+        "create_relations",
+        "add_observations",
+        "delete_entities",
+        "delete_observations",
+        "delete_relations",
+        "read_graph",
+        "search_nodes",
+        "open_nodes"
+      ]
+    },
+
+    
 - **Claude Desktop**: Set the MCP server endpoint in Claude's settings to `http://localhost:8080` (or your configured host/port).
 
 ### 6. Test the MCP Server
