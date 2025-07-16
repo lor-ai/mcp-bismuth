@@ -227,23 +227,160 @@ const result = await callTool("train_step", {
 const state = await callTool("get_memory_state", {});
 ```
 
+## How the MCP Server Learns: TITANS-Inspired Neural Memory
+
+The Titan Memory MCP server implements a sophisticated neural memory architecture inspired by transformer mechanisms and continual learning principles. Here's a detailed breakdown of the learning process:
+
+### Core Learning Architecture
+
+**Three-Tier Memory Hierarchy:**
+1. **Short-term Memory** - Recent activations and immediate context
+2. **Long-term Memory** - Consolidated patterns and persistent knowledge  
+3. **Meta Memory** - Statistics about memory usage and learning patterns
+
+**Surprise-Driven Learning:**
+The system uses surprise-based learning mechanisms where unexpected inputs trigger stronger memory updates:
+- **Surprise Calculation**: `surprise = ||decoded_output - input||` (L2 norm of prediction error)
+- **Surprise Decay**: Previous surprise scores decay exponentially with configurable rate (default: 0.9)
+- **Memory Gating**: High surprise opens memory gates for stronger encoding
+
+### Forward Pass Learning Process
+
+1. **Input Encoding**: Text inputs are encoded using advanced BPE tokenization or TF-IDF fallback
+2. **Memory Attention**: Transformer-style attention mechanism computes relevance scores across stored memories
+3. **Prediction Generation**: Decoder network generates predictions based on attended memories
+4. **Surprise Computation**: Compare predictions with actual inputs to calculate surprise
+5. **Memory Update**: Update all three memory tiers based on surprise magnitude
+
+```typescript
+// Core forward pass with memory updates
+public forward(input: ITensor, state?: IMemoryState): {
+  predicted: ITensor;
+  memoryUpdate: IMemoryUpdateResult;
+} {
+  const encodedInput = this.encoder.predict(inputTensor);
+  const memoryResult = this.computeMemoryAttention(encodedInput);
+  const decoded = this.decoder.predict([encodedInput, memoryResult]);
+  const surprise = tf.norm(tf.sub(decoded, inputTensor));
+  
+  // Update memory based on surprise
+  const newMemoryState = this.updateMemory(encodedInput, surprise, memoryState);
+  
+  return { predicted: decoded, memoryUpdate: newMemoryState };
+}
+```
+
+### Training Step Learning Process
+
+**Predictive Learning:**
+- Each training step predicts the next input given the current input
+- Loss computed as mean squared error between prediction and target
+- Gradients computed using TensorFlow.js automatic differentiation
+
+**Memory-Augmented Training:**
+1. **Attention-Based Retrieval**: Query current memory using input as key
+2. **Gradient Computation**: Backpropagate through attention mechanism
+3. **Weight Updates**: Update encoder, decoder, and attention networks
+4. **Memory Consolidation**: Move important patterns from short-term to long-term memory
+
+### Online Learning Service
+
+**Ring Buffer Replay System:**
+- Maintains circular buffer of training samples (default: 10,000 samples)
+- Samples mini-batches for continuous learning (default: 32 samples)
+- Three learning objectives combined with configurable weights:
+
+```typescript
+// Mixed loss function combining multiple learning signals
+private computeMixedLoss(batch: TrainingSample[]): {
+  loss: tf.Scalar;
+  gradients: Map<string, tf.Tensor>;
+} {
+  let totalLoss = tf.scalar(0);
+  
+  // Next-token prediction (40% weight)
+  if (this.config.nextTokenWeight > 0) {
+    const nextTokenLoss = this.computeNextTokenLoss(batch);
+    totalLoss = tf.add(totalLoss, tf.mul(nextTokenLoss, 0.4));
+  }
+  
+  // Contrastive learning (20% weight)
+  if (this.config.contrastiveWeight > 0) {
+    const contrastiveLoss = this.computeContrastiveLoss(batch);
+    totalLoss = tf.add(totalLoss, tf.mul(contrastiveLoss, 0.2));
+  }
+  
+  // Masked language modeling (40% weight)
+  if (this.config.mlmWeight > 0) {
+    const mlmLoss = this.computeMLMLoss(batch);
+    totalLoss = tf.add(totalLoss, tf.mul(mlmLoss, 0.4));
+  }
+  
+  return { loss: totalLoss, gradients };
+}
+```
+
+### Advanced Learning Features
+
+**Hierarchical Memory (Optional):**
+- Multiple memory levels with different time scales
+- Higher levels update less frequently (powers of 2)
+- Enables long-term pattern recognition and forgetting
+
+**Information-Gain Based Pruning:**
+- Automatically removes low-relevance memories when capacity reached
+- Scores memories based on: recency, frequency, surprise history
+- Distills important patterns into long-term storage before pruning
+
+**Gradient Management:**
+- **Gradient Clipping**: Prevents exploding gradients (default: 1.0)
+- **Gradient Accumulation**: Accumulates gradients over multiple steps for stability
+- **NaN Guards**: Detects and skips corrupted gradient updates
+
+### Memory Persistence and Bootstrapping
+
+**Automatic State Persistence:**
+- Memory state auto-saved every 60 seconds
+- Checkpoint system for manual save/load operations
+- Graceful shutdown with state preservation
+
+**Bootstrap Learning:**
+- `bootstrap_memory` tool initializes memory from URLs or text corpora
+- TF-IDF vectorizer provides sparse fallback for untrained models
+- Seed summaries populate initial memory state
+
+### Continual Learning Loop
+
+The online learning service runs continuously in the background:
+
+1. **Sample Collection**: Gather training samples from interactions
+2. **Batch Formation**: Create mini-batches from replay buffer
+3. **Mixed Loss Computation**: Combine multiple learning objectives
+4. **Gradient Application**: Update model weights with clipped gradients
+5. **Memory Consolidation**: Promote important short-term memories to long-term storage
+6. **Pruning**: Remove irrelevant memories to maintain performance
+
+This architecture enables the MCP server to continuously learn from interactions while maintaining stable, long-term memory that persists across sessions and model updates.
+
 ## Memory Management
 
 The Titan Memory MCP server includes sophisticated memory management to prevent memory leaks and ensure efficient tensor operations:
 
-1. **Automatic Cleanup**: Periodically cleans up unused tensors
-2. **Memory Encryption**: Securely stores memory states
-3. **Tensor Validation**: Ensures tensors have the correct shape
-4. **Error Recovery**: Handles tensor errors gracefully
+1. **Automatic Cleanup**: Periodically cleans up unused tensors using `tf.tidy()`
+2. **Memory Encryption**: Securely stores memory states with AES-256-CBC encryption
+3. **Tensor Validation**: Ensures tensors have correct shapes and are not disposed
+4. **Error Recovery**: Handles tensor errors gracefully with fallback mechanisms
 
 ## Architecture
 
 The Titan Memory MCP server is built with a modular architecture:
 
-- **TitanMemoryServer**: Main server class that registers tools and handles requests
-- **TitanMemoryModel**: Neural memory model implementation
-- **VectorProcessor**: Handles input processing and text encoding
-- **MemoryManager**: Manages tensor operations and memory cleanup
+- **TitanMemoryServer**: Main server class that registers 16 MCP tools and handles requests
+- **TitanMemoryModel**: Neural memory model with transformer-inspired attention mechanisms
+- **LearnerService**: Online learning loop with replay buffer and mixed loss functions
+- **MemoryPruner**: Information-gain based pruning for memory management
+- **AdvancedTokenizer**: BPE tokenization with embedding capabilities
+- **VectorProcessor**: Text encoding and tensor operations with safety guards
 
 ## Contributing
 
