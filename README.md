@@ -199,7 +199,7 @@ Reset accumulated gradients to recover from training issues.
 
 **Parameters:** None
 
-## Usage with Claude 3.7 Sonnet in Cursor
+## Usage with Claude 4 Sonnet in Cursor
 
 The Titan Memory MCP server is designed to work seamlessly with Claude 3.7 Sonnet in Cursor. Here's an example of how to use it:
 
