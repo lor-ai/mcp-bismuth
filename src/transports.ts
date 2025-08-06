@@ -26,7 +26,7 @@ export class WebSocketTransport implements Transport {
         if (!this.requestHandler) {return;}
         try {
           const rawRequest = JSON.parse(event.data.toString());
-          const request = CallToolRequestSchema.parse(rawRequest); // Validate
+          const request = CallToolRequestSchema.parse(rawRequest) as CallToolRequest; // Validate and cast
           const response = await this.requestHandler(request);
           this.ws.send(JSON.stringify(response));
         } catch (error) {

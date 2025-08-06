@@ -556,15 +556,17 @@ export class TitanMemoryModel implements IMemoryModel {
           });
 
           // Convert 2D embeddings to 1D by taking mean across sequence dimension
-          const flattened = tf.mean(tokenizationResult.embeddings, 0);
+          const flattened = tf.mean(tokenizationResult.embeddings, 0) as tf.Tensor1D;
 
           // Dispose of intermediate tensors
           tokenizationResult.embeddings.dispose();
           tokenizationResult.attentionMask.dispose();
 
+          safeLog(`encodeText: Advanced tokenizer succeeded, returning Tensor1D with shape ${flattened.shape}`);
+          safeLog(`encodeText: Advanced tokenizer succeeded, returning Tensor1D with shape ${flattened.shape}`);
           return flattened;
         } catch (error) {
-          console.warn('Advanced tokenizer failed, falling back to legacy mode:', error);
+          console.warn('encodeText: Advanced tokenizer failed, falling back to legacy mode:', error);
           this.useLegacyCharEncoding = true;
           if (this.advancedTokenizer) {
             this.advancedTokenizer.setLegacyMode(true);
@@ -592,6 +594,7 @@ export class TitanMemoryModel implements IMemoryModel {
         } catch (error) {
           console.warn('TF-IDF fallback failed:', error);
         }
+        safeLog('encodeText: TF-IDF fallback failed.');
       }
 
       // Fallback to VectorProcessor or legacy character encoding
@@ -606,8 +609,10 @@ export class TitanMemoryModel implements IMemoryModel {
         }
 
         if (result.shape.length !== 1) {
+          console.error(`encodeText: VectorProcessor returned tensor with unexpected shape: ${result.shape}`);
           throw new Error('Encoded tensor has unexpected shape');
         }
+        safeLog(`encodeText: VectorProcessor succeeded, returning Tensor1D with shape ${result.shape}`);
         return result;
       } else {
         // Final fallback: simple character encoding
@@ -616,9 +621,12 @@ export class TitanMemoryModel implements IMemoryModel {
         while (paddedTokens.length < this.config.maxSequenceLength) {
           paddedTokens.push(0);
         }
-        return tf.tensor1d(paddedTokens.map((t: number) => t / this.vocabSize)); // Normalize
+        const tensor = tf.tensor1d(paddedTokens.map((t: number) => t / this.vocabSize)); // Normalize
+        safeLog(`encodeText: Legacy character encoding succeeded, returning Tensor1D with shape ${tensor.shape}`);
+        return tensor;
       }
     });
+    safeLog(`encodeText: end`);
   }
 
   /**
@@ -681,11 +689,11 @@ export class TitanMemoryModel implements IMemoryModel {
 
       // Update access counts for memory management
       if (type === 'episodic') {
-        const newAccessCounts = extendedState.episodicAccessCounts.add(weights);
+        const newAccessCounts = extendedState.episodicAccessCounts.add(weights) as tf.Tensor1D;
         tf.dispose(extendedState.episodicAccessCounts);
         extendedState.episodicAccessCounts = newAccessCounts;
       } else {
-        const newAccessCounts = extendedState.semanticAccessCounts.add(weights);
+        const newAccessCounts = extendedState.semanticAccessCounts.add(weights) as tf.Tensor1D;
         tf.dispose(extendedState.semanticAccessCounts);
         extendedState.semanticAccessCounts = newAccessCounts;
       }
@@ -1015,7 +1023,10 @@ export class TitanMemoryModel implements IMemoryModel {
     // Perform the search
     const results = await this.hnswIndex.search(query, topK);
 
+    // Log the shape of the results before reshaping
+    safeLog(`annSearch: HNSW search results shape before reshape: ${results.map((t: tf.Tensor) => t.shape).join(', ')}`);
     // Convert 1D results back to 2D tensors for compatibility
+    safeLog(`annSearch: HNSW search results shape after reshape: ${results.map((t: tf.Tensor) => t.shape).join(', ')}`);
     return results.map((tensor: tf.Tensor) => tensor.reshape([1, -1]));
   }
 
@@ -2937,6 +2948,7 @@ export class TitanMemoryModel implements IMemoryModel {
     surprise: ITensor,
     state: IMemoryState
   ): IMemoryState {
+    safeLog(`updateMemory: input shape: ${input.shape}`);
     return tf.tidy(() => {
       // Find least recently used memory slot
       const oldestSlotIndex = tf.argMin(state.timestamps).dataSync()[0];
