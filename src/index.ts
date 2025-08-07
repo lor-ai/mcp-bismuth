@@ -57,7 +57,7 @@ export class TitanMemoryServer {
   private vectorProcessor: VectorProcessor;
   private memoryState: IMemoryState;
   private learnerService?: LearnerService;
-  private tokenizer?: any; // Will be AdvancedTokenizer when available
+  private tokenizer?: any; // TODO: Will be AdvancedTokenizer when available
   private isInitialized = false;
   private autoSaveInterval?: NodeJS.Timeout;
   private readonly memoryPath: string;
@@ -327,7 +327,14 @@ export class TitanMemoryServer {
       "Perform a forward pass through the model with given input",
       {
         x: z.union([z.string(), z.array(z.number())]).describe("Input data (text or number array)"),
-        memoryState: z.any().optional().describe("Optional memory state")
+        memoryState: z.object({
+          shortTerm: z.array(z.number()),
+          longTerm: z.array(z.number()),
+          meta: z.array(z.number()),
+          timestamps: z.array(z.number()),
+          accessCounts: z.array(z.number()),
+          surpriseHistory: z.array(z.number())
+        }).optional().describe("Optional memory state")
       },
       async (params) => {
         await this.ensureInitialized();
@@ -1036,7 +1043,7 @@ export class TitanMemoryServer {
     });
   }
 
-  private async performHealthCheck(checkType: string): Promise<any> {
+  private async performHealthCheck(checkType: string): Promise<{status: string, tensors: number, bytes: number, capacity: number, checkType: string}> {
     const memoryInfo = tf.memory();
     const stats = this.getMemoryStats();
 
@@ -1049,7 +1056,7 @@ export class TitanMemoryServer {
     };
   }
 
-  private calculateHealthScore(healthData: any): number {
+  private calculateHealthScore(healthData: {tensors: number, bytes: number, capacity: number, checkType: string}): number {
     // Simple health score calculation
     let score = 1.0;
 
@@ -1059,7 +1066,7 @@ export class TitanMemoryServer {
     return Math.max(0, score);
   }
 
-  private generateHealthRecommendations(healthData: any, healthScore: number): string[] {
+  private generateHealthRecommendations(healthData: {tensors: number, bytes: number, capacity: number, checkType: string}, healthScore: number): string[] {
     const recommendations = [];
 
     if (healthData.tensors > 1000) {

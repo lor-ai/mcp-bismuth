@@ -320,7 +320,7 @@ export class TitanMemoryModel implements IMemoryModel {
   // Add encoder and decoder properties
   private encoder!: tf.LayersModel;
   private decoder!: tf.LayersModel;
-  private tokenizer: any = null;
+  private tokenizer: any = null; // TODO: Remove any type
   private advancedTokenizer: AdvancedTokenizer | null = null;
   private vocabSize = 10000;
   private useLegacyCharEncoding = false;
@@ -1033,23 +1033,23 @@ export class TitanMemoryModel implements IMemoryModel {
   /**
    * Forward pass with hierarchical memory support
    */
-  public forward(input: ITensor, state?: IMemoryState): {
+  public forward(input: ITensor, state?: IMemoryState): { // TODO: Fix any type
     predicted: ITensor;
     memoryUpdate: IMemoryUpdateResult;
-  } {
+  }: {
     let predicted: ITensor;
     let memoryUpdate: IMemoryUpdateResult;
     tf.tidy(() => {
       const memoryState = state || this.memoryState;
-      const inputTensor = unwrapTensor(input);
-      const encodedInput = this.encoder.predict(inputTensor) as tf.Tensor;
+      const inputTensor = unwrapTensor(input)!;
+      const encodedInput = this.encoder.predict(inputTensor) as tf.Tensor<tf.Rank>;
       const memoryResult = this.config.useHierarchicalMemory
         ? this.retrieveFromHierarchicalMemory(encodedInput)
         : this.retrieveFromMemory(encodedInput);
       const combined = tf.concat([encodedInput, unwrapTensor(memoryResult)], 1);
-      const decoded = this.decoder.predict(combined) as tf.Tensor;
+      const decoded = this.decoder.predict(combined) as tf.Tensor<tf.Rank>;
       const surprise = tf.sub(decoded, inputTensor);
-      const surpriseMagnitude = tf.norm(surprise);
+      const surpriseMagnitude = tf.norm(surprise) as tf.Scalar;
       const attention: IAttentionBlock = {
         keys: tf.zeros([1]),
         values: tf.zeros([1]),
@@ -1067,8 +1067,8 @@ export class TitanMemoryModel implements IMemoryModel {
         );
       }
       this.stepCount++;
-      predicted = decoded;
-      memoryUpdate = {
+      predicted = decoded as tf.Tensor<tf.Rank>;
+      memoryUpdate = { // TODO: Fix any type
         newState: newMemoryState,
         attention,
         surprise: {
@@ -1078,7 +1078,7 @@ export class TitanMemoryModel implements IMemoryModel {
         }
       };
     });
-    return { predicted: predicted!, memoryUpdate: memoryUpdate! };
+    return { predicted: predicted!, memoryUpdate: memoryUpdate! }; // TODO: Fix any type
   }
 
   private computeMemoryAttention(query: tf.Tensor2D): IAttentionBlock {
@@ -1195,7 +1195,7 @@ export class TitanMemoryModel implements IMemoryModel {
   /**
    * Enhanced training step with contrastive learning
    */
-  public trainStep(
+  public trainStep( // TODO: Fix any type
     currentInput: ITensor,
     nextInput: ITensor,
     state: IMemoryState
